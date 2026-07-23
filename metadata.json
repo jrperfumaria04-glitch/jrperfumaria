@@ -1,0 +1,6 @@
+{
+  "name": "JR Perfumaria",
+  "description": "A sua perfumaria de confiança com as melhores fragrâncias nacionais e importadas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

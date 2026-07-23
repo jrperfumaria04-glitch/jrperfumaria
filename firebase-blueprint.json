@@ -1,0 +1,102 @@
+{
+  "entities": {
+    "product": {
+      "title": "Product",
+      "description": "Product in the catalog",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "price": { "type": "number" },
+        "image": { "type": "string" },
+        "category": { "type": "string" },
+        "featured": { "type": "boolean" }
+      },
+      "required": ["id", "name", "price", "image", "category"]
+    },
+    "category": {
+      "title": "Category",
+      "description": "Product category filtering tag",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "slug": { "type": "string" }
+      },
+      "required": ["id", "name", "slug"]
+    },
+    "banner": {
+      "title": "Banner",
+      "description": "Hero promo carousel banner",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "image": { "type": "string" },
+        "title": { "type": "string" },
+        "subtitle": { "type": "string" },
+        "cta": { "type": "string" },
+        "active": { "type": "boolean" },
+        "device": { "type": "string" },
+        "opacity": { "type": "integer" }
+      },
+      "required": ["id", "image", "title", "subtitle", "active"]
+    },
+    "setting": {
+      "title": "Setting",
+      "description": "Global store configuration settings",
+      "type": "object",
+      "properties": {
+        "key": { "type": "string" },
+        "value": { "type": "string" }
+      },
+      "required": ["key", "value"]
+    },
+    "user": {
+      "title": "User",
+      "description": "User profile with optional cart synchronization",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string" },
+        "cart": { "type": "array" }
+      },
+      "required": ["id", "email"]
+    },
+    "admin": {
+      "title": "Admin",
+      "description": "Admin email record indicator document",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" }
+      },
+      "required": ["email"]
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": "#/entities/product",
+      "description": "Public products catalog"
+    },
+    "/categories/{categoryId}": {
+      "schema": "#/entities/category",
+      "description": "Public product categories list"
+    },
+    "/banners/{bannerId}": {
+      "schema": "#/entities/banner",
+      "description": "Public promo carousels"
+    },
+    "/settings/{settingId}": {
+      "schema": "#/entities/setting",
+      "description": "Public global store configs"
+    },
+    "/users/{userId}": {
+      "schema": "#/entities/user",
+      "description": "User personal profiles and carts"
+    },
+    "/admins/{adminId}": {
+      "schema": "#/entities/admin",
+      "description": "Allowed administrators registration list"
+    }
+  }
+}
