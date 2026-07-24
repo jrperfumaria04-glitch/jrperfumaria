@@ -44,6 +44,7 @@ const AdminSettings = () => {
   const [loadingCfStatus, setLoadingCfStatus] = useState(false);
   const [initializingD1, setInitializingD1] = useState(false);
   const [pullingD1, setPullingD1] = useState(false);
+  const [pushingD1, setPushingD1] = useState(false);
 
   const fetchCloudflareStatus = async () => {
     setLoadingCfStatus(true);
@@ -94,6 +95,24 @@ const AdminSettings = () => {
       toast.error("Falha ao comunicar com o servidor.");
     } finally {
       setPullingD1(false);
+    }
+  };
+
+  const handlePushD1 = async () => {
+    setPushingD1(true);
+    try {
+      const res = await fetch("/api/cloudflare/push-to-d1", { method: "POST" });
+      const data = await res.json();
+      if (res.ok) {
+        toast.success(data.message || "Dados enviados para o Cloudflare D1 com sucesso!");
+        fetchCloudflareStatus();
+      } else {
+        toast.error(data.error || "Erro ao enviar dados para o Cloudflare D1.");
+      }
+    } catch (err: any) {
+      toast.error("Falha ao comunicar com o servidor.");
+    } finally {
+      setPushingD1(false);
     }
   };
 
@@ -307,6 +326,15 @@ INSERT OR IGNORE INTO products (id, name, description, price, original_price, im
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  onClick={handlePushD1}
+                  disabled={pushingD1}
+                  className="bg-blue-600 hover:bg-blue-700 text-white text-xs gap-1.5"
+                >
+                  {pushingD1 ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+                  Enviar Dados Atuais para o D1
+                </Button>
                 <Button
                   size="sm"
                   onClick={handlePullD1}

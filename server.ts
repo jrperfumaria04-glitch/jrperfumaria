@@ -636,6 +636,29 @@ app.post("/api/cloudflare/init-d1", async (req, res) => {
   }
 });
 
+// Push all local DB records to Cloudflare D1
+app.post("/api/cloudflare/push-to-d1", async (req, res) => {
+  if (!isCloudflareD1Configured()) {
+    return res.status(400).json({
+      error: "Cloudflare D1 não está configurado nas variáveis de ambiente do .env."
+    });
+  }
+
+  try {
+    const db = readDb();
+    await syncDbToCloudflare(db);
+    return res.json({
+      ok: true,
+      message: `Todos os dados locais (${db.products.length} produtos, ${db.categories.length} categorias, ${db.banners.length} banners) foram enviados e sincronizados no Cloudflare D1!`
+    });
+  } catch (err: any) {
+    console.error("[Push to D1 Error]", err);
+    return res.status(500).json({
+      error: err.message || "Erro ao enviar dados para o Cloudflare D1."
+    });
+  }
+});
+
 // Import/Pull all records from Cloudflare D1 into local DB
 app.post("/api/cloudflare/pull-from-d1", async (req, res) => {
   if (!isCloudflareD1Configured()) {
