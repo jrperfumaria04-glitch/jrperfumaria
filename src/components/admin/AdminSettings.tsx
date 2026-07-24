@@ -13,7 +13,6 @@ interface CloudflareStatus {
   configured: boolean;
   r2: { configured: boolean; bucket: string; publicUrl: string };
   d1: { configured: boolean; working?: boolean; databaseId: string; error?: string };
-  kv: { configured: boolean; namespaceId: string };
   accountId: string;
 }
 
@@ -129,7 +128,10 @@ CREATE TABLE IF NOT EXISTS products (
   subCategory2 TEXT,
   featured INTEGER DEFAULT 0,
   stock INTEGER DEFAULT 0,
-  sku TEXT
+  sku TEXT,
+  brand TEXT,
+  categories TEXT,
+  expirationDate TEXT
 );
 
 CREATE TABLE IF NOT EXISTS categories (
@@ -148,7 +150,8 @@ CREATE TABLE IF NOT EXISTS banners (
   cta TEXT,
   active INTEGER DEFAULT 1,
   device TEXT DEFAULT 'all',
-  opacity INTEGER DEFAULT 100
+  opacity INTEGER DEFAULT 100,
+  overlayOpacity INTEGER DEFAULT 60
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -239,7 +242,7 @@ INSERT OR IGNORE INTO products (id, name, description, price, original_price, im
                 Integração Cloudflare (Banco de Dados & Imagens R2)
               </h3>
               <p className="text-xs text-muted-foreground">
-                Armazenamento de imagens (R2) e persistência de produtos/categorias (D1 / KV).
+                Armazenamento de imagens (R2) e persistência de produtos/categorias (D1).
               </p>
             </div>
           </div>
@@ -286,32 +289,30 @@ INSERT OR IGNORE INTO products (id, name, description, price, original_price, im
                 </div>
               </div>
 
-              {/* D1 / KV Database Status */}
+              {/* D1 Database Status */}
               <div className={`p-3.5 rounded-md border text-sm flex items-start gap-3 ${
-                cfStatus.d1.configured || cfStatus.kv.configured
-                  ? "bg-emerald-500/5 border-emerald-500/30 text-emerald-950 dark:text-emerald-200" 
-                  : "bg-blue-500/5 border-blue-500/30 text-blue-950 dark:text-blue-200"
+                cfStatus.d1.configured
+                  ? "bg-emerald-500/5 border-emerald-500/30 text-emerald-950 dark:text-emerald-200"
+                  : "bg-amber-500/5 border-amber-500/30 text-amber-950 dark:text-amber-200"
               }`}>
-                <Database className={`h-5 w-5 shrink-0 mt-0.5 ${cfStatus.d1.configured || cfStatus.kv.configured ? "text-emerald-600 dark:text-emerald-400" : "text-blue-600 dark:text-blue-400"}`} />
+                <Database className={`h-5 w-5 shrink-0 mt-0.5 ${cfStatus.d1.configured ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}`} />
                 <div>
                   <div className="font-semibold flex items-center gap-1.5">
-                    Cloudflare Database (D1 / KV)
-                    {cfStatus.d1.configured || cfStatus.kv.configured ? (
+                    Cloudflare D1 (Banco de Dados)
+                    {cfStatus.d1.configured ? (
                       <span className="inline-flex items-center gap-1 text-[11px] bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 px-2 py-0.5 rounded-full">
-                        <CheckCircle2 className="h-3 w-3" /> Conectado ({cfStatus.d1.configured ? "D1 SQL" : "KV Store"})
+                        <CheckCircle2 className="h-3 w-3" /> Conectado (D1 SQL)
                       </span>
                     ) : (
-                      <span className="inline-flex items-center gap-1 text-[11px] bg-blue-500/15 text-blue-700 dark:text-blue-300 px-2 py-0.5 rounded-full">
-                        <CheckCircle2 className="h-3 w-3" /> Firestore & JSON Sync
+                      <span className="inline-flex items-center gap-1 text-[11px] bg-amber-500/15 text-amber-700 dark:text-amber-300 px-2 py-0.5 rounded-full">
+                        <AlertCircle className="h-3 w-3" /> Não configurado
                       </span>
                     )}
                   </div>
                   <p className="text-xs opacity-90 mt-1">
                     {cfStatus.d1.configured
                       ? `D1 Database ID: ${cfStatus.d1.databaseId}`
-                      : cfStatus.kv.configured
-                      ? `KV Namespace ID: ${cfStatus.kv.namespaceId}`
-                      : "Banco de dados sincronizado automaticamente no Firebase Firestore e no servidor."}
+                      : "O D1 é o único banco de dados da loja. Configure CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN e CLOUDFLARE_D1_DATABASE_ID no .env."}
                   </p>
                 </div>
               </div>

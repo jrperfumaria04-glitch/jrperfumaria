@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import path from "path";
 import fs from "fs";
@@ -37,11 +38,11 @@ const upload = multer({
   },
 });
 
-// JSON File Database structure
-const DB_PATH = path.join(process.cwd(), "database.json");
-
 // -----------------------------------------------------------------------------
-// CLOUDFLARE INTEGRATION (R2 Object Storage & D1/KV Database)
+// CLOUDFLARE INTEGRATION (R2 Object Storage & D1 Database)
+//
+// This store uses Cloudflare D1 as the SINGLE source of truth. There is no
+// local JSON database anymore — every read/write goes straight to D1.
 // -----------------------------------------------------------------------------
 
 function isCloudflareR2Configured(): boolean {
@@ -96,18 +97,13 @@ async function uploadToCloudflareR2(filePath: string, filename: string, mimeType
 function isCloudflareD1Configured(): boolean {
   return Boolean(
     process.env.CLOUDFLARE_ACCOUNT_ID &&
-    process.env.CLOUDFLARE_API_TOKEN &&
+    (process.env.CLOUDFLARE_API_TOKEN || process.env.CLOUDFLARE_API_KEY) &&
     process.env.CLOUDFLARE_D1_DATABASE_ID
   );
 }
 
-function isCloudflareKVConfigured(): boolean {
-  return Boolean(
-    process.env.CLOUDFLARE_ACCOUNT_ID &&
-    process.env.CLOUDFLARE_API_TOKEN &&
-    process.env.CLOUDFLARE_KV_NAMESPACE_ID
-  );
-}
+const D1_NOT_CONFIGURED_MESSAGE =
+  "Cloudflare D1 não está configurado. Defina CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN e CLOUDFLARE_D1_DATABASE_ID no arquivo .env para que a loja funcione.";
 
 async function executeD1(sql: string, params: any[] = []): Promise<any[]> {
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
@@ -116,7 +112,7 @@ async function executeD1(sql: string, params: any[] = []): Promise<any[]> {
   const email = process.env.CLOUDFLARE_AUTH_EMAIL || process.env.CLOUDFLARE_EMAIL;
 
   if (!accountId || !token || !d1Id) {
-    throw new Error("Cloudflare D1 não está totalmente configurado no .env.");
+    throw new Error(D1_NOT_CONFIGURED_MESSAGE);
   }
 
   const headers: Record<string, string> = {
@@ -144,7 +140,7 @@ async function executeD1(sql: string, params: any[] = []): Promise<any[]> {
     const rawErr = json.errors?.[0]?.message || "Cloudflare D1 query failed";
     if (rawErr.toLowerCase().includes("authentication error")) {
       throw new Error(
-        "Erro de Autenticação na API do Cloudflare D1: O token 'CLOUDFLARE_API_TOKEN' não possui a permissão 'Account -> D1 -> Edit' ou as credenciais estão incorretas. Verifique seu API Token ou use a aba Console do Cloudflare D1 para colar o script SQL."
+        "Erro de Autenticação na API do Cloudflare D1: O token 'CLOUDFLARE_API_TOKEN' não possui a permissão 'Account -> D1 -> Edit' ou as credenciais estão incorretas. Verifique seu API Token."
       );
     }
     throw new Error(rawErr);
@@ -153,202 +149,9 @@ async function executeD1(sql: string, params: any[] = []): Promise<any[]> {
   return json.result?.[0]?.results || [];
 }
 
-async function initD1Schema() {
-  if (!isCloudflareD1Configured()) return;
-  try {
-    console.log("[Cloudflare D1 SQL] Verificando e criando tabelas SQL...");
-    await executeD1(`
-      CREATE TABLE IF NOT EXISTS products (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        description TEXT,
-        price REAL NOT NULL,
-        original_price REAL,
-        image TEXT,
-        category TEXT,
-        subCategory1 TEXT,
-        subCategory2 TEXT,
-        featured INTEGER DEFAULT 0,
-        stock INTEGER DEFAULT 0,
-        sku TEXT
-      );
-    `);
-
-    await executeD1(`
-      CREATE TABLE IF NOT EXISTS categories (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        slug TEXT NOT NULL,
-        parentId TEXT,
-        isBrand INTEGER DEFAULT 0
-      );
-    `);
-
-    await executeD1(`
-      CREATE TABLE IF NOT EXISTS banners (
-        id TEXT PRIMARY KEY,
-        image TEXT NOT NULL,
-        title TEXT,
-        subtitle TEXT,
-        cta TEXT,
-        active INTEGER DEFAULT 1,
-        device TEXT DEFAULT 'all',
-        opacity INTEGER DEFAULT 100
-      );
-    `);
-
-    await executeD1(`
-      CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
-      );
-    `);
-
-    console.log("[Cloudflare D1 SQL] Tabelas SQL (products, categories, banners, settings) prontas!");
-
-    const existingProducts = await executeD1("SELECT COUNT(*) as count FROM products;");
-    if (existingProducts?.[0]?.count === 0) {
-      console.log("[Cloudflare D1 SQL] Semeadura inicial com dados padrão...");
-      for (const p of DEFAULT_DB.products) {
-        await executeD1(
-          `INSERT OR REPLACE INTO products (id, name, description, price, original_price, image, category, subCategory1, subCategory2, featured) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [p.id, p.name, p.description || "", p.price, p.original_price || null, p.image, p.category, p.subCategory1 || null, p.subCategory2 || null, p.featured ? 1 : 0]
-        );
-      }
-      for (const c of DEFAULT_DB.categories) {
-        await executeD1(
-          `INSERT OR REPLACE INTO categories (id, name, slug, parentId, isBrand) VALUES (?, ?, ?, ?, ?)`,
-          [c.id, c.name, c.slug, c.parentId || null, c.isBrand ? 1 : 0]
-        );
-      }
-      for (const b of DEFAULT_DB.banners) {
-        await executeD1(
-          `INSERT OR REPLACE INTO banners (id, image, title, subtitle, cta, active, device, opacity) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [b.id, b.image, b.title, b.subtitle, b.cta, b.active ? 1 : 0, b.device, b.opacity]
-        );
-      }
-      for (const s of DEFAULT_DB.settings) {
-        await executeD1(
-          `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
-          [s.key, s.value]
-        );
-      }
-      console.log("[Cloudflare D1 SQL] Dados padrão gravados no D1!");
-    }
-  } catch (err: any) {
-    console.warn("[Cloudflare D1 Schema Init Warning]", err.message || err);
-  }
-}
-
-async function syncDbToCloudflare(dbData: JsonDatabase) {
-  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
-  const token = process.env.CLOUDFLARE_API_TOKEN;
-
-  if (isCloudflareD1Configured()) {
-    try {
-      for (const p of dbData.products) {
-        await executeD1(
-          `INSERT OR REPLACE INTO products (id, name, description, price, original_price, image, category, subCategory1, subCategory2, featured, stock, sku) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [p.id, p.name, p.description || "", p.price, p.original_price || null, p.image, p.category, p.subCategory1 || null, p.subCategory2 || null, p.featured ? 1 : 0, p.stock ?? null, p.sku || null]
-        );
-      }
-      for (const c of dbData.categories) {
-        await executeD1(
-          `INSERT OR REPLACE INTO categories (id, name, slug, parentId, isBrand) VALUES (?, ?, ?, ?, ?)`,
-          [c.id, c.name, c.slug, c.parentId || null, c.isBrand ? 1 : 0]
-        );
-      }
-      for (const b of dbData.banners) {
-        await executeD1(
-          `INSERT OR REPLACE INTO banners (id, image, title, subtitle, cta, active, device, opacity) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [b.id, b.image, b.title, b.subtitle, b.cta, b.active ? 1 : 0, b.device, b.opacity]
-        );
-      }
-      for (const s of dbData.settings) {
-        await executeD1(
-          `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
-          [s.key, s.value]
-        );
-      }
-      console.log("[Cloudflare D1 SQL] Sincronização de tabelas SQL concluída!");
-    } catch (err: any) {
-      console.warn("[Cloudflare D1 SQL Sync Notice]", err?.message || err);
-    }
-  } else if (isCloudflareKVConfigured()) {
-    const kvId = process.env.CLOUDFLARE_KV_NAMESPACE_ID;
-    const jsonString = JSON.stringify(dbData);
-    try {
-      await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${kvId}/values/database`,
-        {
-          method: "PUT",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-          body: jsonString,
-        }
-      );
-      console.log("[Cloudflare KV] Database sync completed!");
-    } catch (err: any) {
-      console.warn("[Cloudflare KV Sync Notice]", err?.message || err);
-    }
-  }
-}
-
-async function loadDbFromCloudflare(): Promise<JsonDatabase | null> {
-  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
-  const token = process.env.CLOUDFLARE_API_TOKEN;
-
-  if (isCloudflareD1Configured()) {
-    const d1Id = process.env.CLOUDFLARE_D1_DATABASE_ID;
-    try {
-      const res = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${d1Id}/query`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            sql: "SELECT json_data FROM store_data WHERE key = 'database';",
-          }),
-        }
-      );
-      const data: any = await res.json();
-      if (data?.result?.[0]?.results?.[0]?.json_data) {
-        console.log("[Cloudflare D1] Database successfully loaded from Cloudflare!");
-        return JSON.parse(data.result[0].results[0].json_data);
-      }
-    } catch (err: any) {
-      console.warn("[Cloudflare D1 Load Notice]", err?.message || err);
-    }
-  } else if (isCloudflareKVConfigured()) {
-    const kvId = process.env.CLOUDFLARE_KV_NAMESPACE_ID;
-    try {
-      const res = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces/${kvId}/values/database`,
-        {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        }
-      );
-      if (res.ok) {
-        const text = await res.text();
-        console.log("[Cloudflare KV] Database successfully loaded from Cloudflare!");
-        return JSON.parse(text);
-      }
-    } catch (err: any) {
-      console.warn("[Cloudflare KV Load Notice]", err?.message || err);
-    }
-  }
-
-  return null;
-}
-
+// -----------------------------------------------------------------------------
+// TYPES
+// -----------------------------------------------------------------------------
 
 interface Product {
   id: string;
@@ -385,6 +188,7 @@ interface Banner {
   active: boolean;
   device?: string;
   opacity?: number;
+  overlayOpacity?: number;
 }
 
 interface Setting {
@@ -399,6 +203,7 @@ interface JsonDatabase {
   settings: Setting[];
 }
 
+// Default catalog used ONLY to seed an empty Cloudflare D1 database.
 const DEFAULT_DB: JsonDatabase = {
   categories: [
     { id: "10", name: "Perfumaria", slug: "perfumaria" },
@@ -536,28 +341,251 @@ const DEFAULT_DB: JsonDatabase = {
   ]
 };
 
-// Helper functions to read/write JSON Database
-function readDb(): JsonDatabase {
-  try {
-    if (!fs.existsSync(DB_PATH)) {
-      fs.writeFileSync(DB_PATH, JSON.stringify(DEFAULT_DB, null, 2), "utf8");
-      return DEFAULT_DB;
+// -----------------------------------------------------------------------------
+// D1 SCHEMA, MIGRATION & SEED
+// -----------------------------------------------------------------------------
+
+async function createD1Tables() {
+  await executeD1(`
+    CREATE TABLE IF NOT EXISTS products (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      price REAL NOT NULL,
+      original_price REAL,
+      image TEXT,
+      category TEXT,
+      subCategory1 TEXT,
+      subCategory2 TEXT,
+      featured INTEGER DEFAULT 0,
+      stock INTEGER DEFAULT 0,
+      sku TEXT,
+      brand TEXT,
+      categories TEXT,
+      expirationDate TEXT
+    );
+  `);
+
+  await executeD1(`
+    CREATE TABLE IF NOT EXISTS categories (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      slug TEXT NOT NULL,
+      parentId TEXT,
+      isBrand INTEGER DEFAULT 0
+    );
+  `);
+
+  await executeD1(`
+    CREATE TABLE IF NOT EXISTS banners (
+      id TEXT PRIMARY KEY,
+      image TEXT NOT NULL,
+      title TEXT,
+      subtitle TEXT,
+      cta TEXT,
+      active INTEGER DEFAULT 1,
+      device TEXT DEFAULT 'all',
+      opacity INTEGER DEFAULT 100,
+      overlayOpacity INTEGER DEFAULT 60
+    );
+  `);
+
+  await executeD1(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
+  `);
+}
+
+// Idempotent migrations for D1 databases created before extra columns existed.
+async function migrateD1Schema() {
+  const migrations = [
+    "ALTER TABLE products ADD COLUMN brand TEXT;",
+    "ALTER TABLE products ADD COLUMN categories TEXT;",
+    "ALTER TABLE products ADD COLUMN expirationDate TEXT;",
+    "ALTER TABLE banners ADD COLUMN overlayOpacity INTEGER DEFAULT 60;",
+  ];
+  for (const sql of migrations) {
+    try {
+      await executeD1(sql);
+    } catch (err: any) {
+      const msg = String(err?.message || err).toLowerCase();
+      // "duplicate column name" simply means the migration already ran.
+      if (!msg.includes("duplicate column")) {
+        console.warn("[D1 Migration Notice]", err?.message || err);
+      }
     }
-    const data = fs.readFileSync(DB_PATH, "utf8");
-    return JSON.parse(data);
-  } catch (error) {
-    console.error("Error reading db.json, falling back to default:", error);
-    return DEFAULT_DB;
   }
 }
 
-function writeDb(data: JsonDatabase) {
-  try {
-    fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), "utf8");
-    syncDbToCloudflare(data).catch((e) => console.warn("Cloudflare background sync warning:", e));
-  } catch (error) {
-    console.error("Error writing db.json:", error);
+// Insert the default catalog. Uses INSERT OR IGNORE so it never overwrites
+// data that already exists in D1 (only fills in what is missing).
+async function seedDefaultsToD1() {
+  for (const p of DEFAULT_DB.products) {
+    await executeD1(
+      `INSERT OR IGNORE INTO products (id, name, description, price, original_price, image, category, subCategory1, subCategory2, featured, stock, sku, brand, categories, expirationDate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [p.id, p.name, p.description || "", p.price, p.original_price ?? null, p.image || "", p.category || "", p.subCategory1 || null, p.subCategory2 || null, p.featured ? 1 : 0, p.stock ?? null, p.sku || null, p.brand || null, p.categories && p.categories.length ? JSON.stringify(p.categories) : null, p.expirationDate || null]
+    );
   }
+  for (const c of DEFAULT_DB.categories) {
+    await executeD1(
+      `INSERT OR IGNORE INTO categories (id, name, slug, parentId, isBrand) VALUES (?, ?, ?, ?, ?)`,
+      [c.id, c.name, c.slug, c.parentId || null, c.isBrand ? 1 : 0]
+    );
+  }
+  for (const b of DEFAULT_DB.banners) {
+    await executeD1(
+      `INSERT OR IGNORE INTO banners (id, image, title, subtitle, cta, active, device, opacity, overlayOpacity) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [b.id, b.image, b.title, b.subtitle, b.cta, b.active ? 1 : 0, b.device || "all", b.opacity ?? 100, b.overlayOpacity ?? 60]
+    );
+  }
+  for (const s of DEFAULT_DB.settings) {
+    await executeD1(
+      `INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`,
+      [s.key, s.value]
+    );
+  }
+}
+
+async function initD1Schema() {
+  if (!isCloudflareD1Configured()) return;
+  console.log("[Cloudflare D1] Verificando e criando tabelas SQL...");
+  await createD1Tables();
+  await migrateD1Schema();
+  console.log("[Cloudflare D1] Tabelas (products, categories, banners, settings) prontas!");
+
+  const existingProducts = await executeD1("SELECT COUNT(*) as count FROM products;");
+  if (existingProducts?.[0]?.count === 0) {
+    console.log("[Cloudflare D1] Banco vazio — semeando catálogo padrão...");
+    await seedDefaultsToD1();
+    console.log("[Cloudflare D1] Catálogo padrão gravado no D1!");
+  }
+}
+
+// -----------------------------------------------------------------------------
+// ROW <-> OBJECT MAPPERS + D1 HELPERS
+// -----------------------------------------------------------------------------
+
+function safeParseArray(value: any): string[] | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map(String) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function mapProductRow(r: any): Product {
+  return {
+    id: String(r.id),
+    name: r.name || "",
+    description: r.description || "",
+    price: Number(r.price) || 0,
+    original_price: r.original_price !== null && r.original_price !== undefined ? Number(r.original_price) : undefined,
+    image: r.image || "",
+    category: r.category || "",
+    subCategory1: r.subCategory1 || undefined,
+    subCategory2: r.subCategory2 || undefined,
+    categories: safeParseArray(r.categories),
+    brand: r.brand || undefined,
+    featured: Boolean(r.featured),
+    sku: r.sku || undefined,
+    stock: r.stock !== null && r.stock !== undefined ? Number(r.stock) : undefined,
+    expirationDate: r.expirationDate || undefined,
+  };
+}
+
+function mapCategoryRow(r: any): Category {
+  return {
+    id: String(r.id),
+    name: r.name || "",
+    slug: r.slug || "",
+    parentId: r.parentId || undefined,
+    isBrand: Boolean(r.isBrand),
+  };
+}
+
+function mapBannerRow(r: any): Banner {
+  return {
+    id: String(r.id),
+    image: r.image || "",
+    title: r.title || "",
+    subtitle: r.subtitle || "",
+    cta: r.cta || "",
+    active: Boolean(r.active),
+    device: r.device || "all",
+    opacity: r.opacity !== null && r.opacity !== undefined ? Number(r.opacity) : 100,
+    overlayOpacity: r.overlayOpacity !== null && r.overlayOpacity !== undefined ? Number(r.overlayOpacity) : 60,
+  };
+}
+
+async function upsertProduct(p: Product) {
+  await executeD1(
+    `INSERT OR REPLACE INTO products (id, name, description, price, original_price, image, category, subCategory1, subCategory2, featured, stock, sku, brand, categories, expirationDate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      p.id,
+      p.name,
+      p.description || "",
+      p.price,
+      p.original_price ?? null,
+      p.image || "",
+      p.category || "",
+      p.subCategory1 || null,
+      p.subCategory2 || null,
+      p.featured ? 1 : 0,
+      p.stock ?? null,
+      p.sku || null,
+      p.brand || null,
+      p.categories && p.categories.length ? JSON.stringify(p.categories) : null,
+      p.expirationDate || null,
+    ]
+  );
+}
+
+async function getProductById(id: string): Promise<Product | null> {
+  const rows = await executeD1("SELECT * FROM products WHERE id = ?;", [id]);
+  return rows?.[0] ? mapProductRow(rows[0]) : null;
+}
+
+async function upsertCategory(c: Category) {
+  await executeD1(
+    `INSERT OR REPLACE INTO categories (id, name, slug, parentId, isBrand) VALUES (?, ?, ?, ?, ?)`,
+    [c.id, c.name, c.slug, c.parentId || null, c.isBrand ? 1 : 0]
+  );
+}
+
+async function getCategoryById(id: string): Promise<Category | null> {
+  const rows = await executeD1("SELECT * FROM categories WHERE id = ?;", [id]);
+  return rows?.[0] ? mapCategoryRow(rows[0]) : null;
+}
+
+async function upsertBanner(b: Banner) {
+  await executeD1(
+    `INSERT OR REPLACE INTO banners (id, image, title, subtitle, cta, active, device, opacity, overlayOpacity) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [b.id, b.image, b.title, b.subtitle, b.cta, b.active ? 1 : 0, b.device || "all", b.opacity ?? 100, b.overlayOpacity ?? 60]
+  );
+}
+
+async function getBannerById(id: string): Promise<Banner | null> {
+  const rows = await executeD1("SELECT * FROM banners WHERE id = ?;", [id]);
+  return rows?.[0] ? mapBannerRow(rows[0]) : null;
+}
+
+// Express guard: ensure D1 is configured before touching the database.
+function ensureD1(res: express.Response): boolean {
+  if (!isCloudflareD1Configured()) {
+    res.status(503).json({ error: D1_NOT_CONFIGURED_MESSAGE });
+    return false;
+  }
+  return true;
+}
+
+function d1ErrorResponse(res: express.Response, err: any, fallback: string) {
+  const message = err?.message || fallback;
+  console.error("[D1 Error]", message);
+  res.status(500).json({ error: message });
 }
 
 // Global middlewares
@@ -583,7 +611,6 @@ app.get("/api/health", (req, res) => {
 app.get("/api/cloudflare/status", async (req, res) => {
   const r2Ok = isCloudflareR2Configured();
   const d1Ok = isCloudflareD1Configured();
-  const kvOk = isCloudflareKVConfigured();
 
   let d1Working = false;
   let d1Error = "";
@@ -598,7 +625,7 @@ app.get("/api/cloudflare/status", async (req, res) => {
   }
 
   res.json({
-    configured: r2Ok || d1Ok || kvOk,
+    configured: r2Ok || d1Ok,
     r2: {
       configured: r2Ok,
       bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME || "",
@@ -610,134 +637,66 @@ app.get("/api/cloudflare/status", async (req, res) => {
       databaseId: process.env.CLOUDFLARE_D1_DATABASE_ID || "",
       error: d1Error,
     },
-    kv: {
-      configured: kvOk,
-      namespaceId: process.env.CLOUDFLARE_KV_NAMESPACE_ID || "",
-    },
     accountId: process.env.CLOUDFLARE_ACCOUNT_ID ? "****" + process.env.CLOUDFLARE_ACCOUNT_ID.slice(-4) : "",
   });
 });
 
-// Initialize Cloudflare D1 Schema & Sync Data
+// Initialize Cloudflare D1 Schema & seed defaults
 app.post("/api/cloudflare/init-d1", async (req, res) => {
-  if (!isCloudflareD1Configured()) {
-    return res.status(400).json({
-      error: "Cloudflare D1 não configurado no .env (requer CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN e CLOUDFLARE_D1_DATABASE_ID)."
-    });
-  }
+  if (!ensureD1(res)) return;
   try {
     await initD1Schema();
-    const db = readDb();
-    await syncDbToCloudflare(db);
-    res.json({ ok: true, message: "Tabelas no Cloudflare D1 criadas e sincronizadas com sucesso!" });
+    res.json({ ok: true, message: "Tabelas no Cloudflare D1 criadas/atualizadas com sucesso!" });
   } catch (err: any) {
     console.error("[Init D1 Endpoint Error]", err);
     res.status(500).json({ error: err.message || "Falha ao criar tabelas no Cloudflare D1." });
   }
 });
 
-// Push all local DB records to Cloudflare D1
+// Populate D1 with the default catalog (only inserts rows that are missing).
 app.post("/api/cloudflare/push-to-d1", async (req, res) => {
-  if (!isCloudflareD1Configured()) {
-    return res.status(400).json({
-      error: "Cloudflare D1 não está configurado nas variáveis de ambiente do .env."
-    });
-  }
-
+  if (!ensureD1(res)) return;
   try {
-    const db = readDb();
-    await syncDbToCloudflare(db);
+    await createD1Tables();
+    await migrateD1Schema();
+    await seedDefaultsToD1();
+
+    const productsRows = await executeD1("SELECT COUNT(*) as count FROM products;");
+    const categoriesRows = await executeD1("SELECT COUNT(*) as count FROM categories;");
+    const bannersRows = await executeD1("SELECT COUNT(*) as count FROM banners;");
+
     return res.json({
       ok: true,
-      message: `Todos os dados locais (${db.products.length} produtos, ${db.categories.length} categorias, ${db.banners.length} banners) foram enviados e sincronizados no Cloudflare D1!`
+      message: `Catálogo padrão garantido no Cloudflare D1 (itens ausentes inseridos). Total: ${productsRows?.[0]?.count ?? 0} produtos, ${categoriesRows?.[0]?.count ?? 0} categorias, ${bannersRows?.[0]?.count ?? 0} banners.`,
     });
   } catch (err: any) {
     console.error("[Push to D1 Error]", err);
-    return res.status(500).json({
-      error: err.message || "Erro ao enviar dados para o Cloudflare D1."
-    });
+    return res.status(500).json({ error: err.message || "Erro ao popular o Cloudflare D1." });
   }
 });
 
-// Import/Pull all records from Cloudflare D1 into local DB
+// Report the current record counts stored in Cloudflare D1.
 app.post("/api/cloudflare/pull-from-d1", async (req, res) => {
-  if (!isCloudflareD1Configured()) {
-    return res.status(400).json({
-      error: "Cloudflare D1 não está configurado nas variáveis do .env."
-    });
-  }
-
+  if (!ensureD1(res)) return;
   try {
-    const productsRows = await executeD1("SELECT * FROM products;");
-    const categoriesRows = await executeD1("SELECT * FROM categories;");
-    const bannersRows = await executeD1("SELECT * FROM banners;");
-    const settingsRows = await executeD1("SELECT * FROM settings;");
+    const productsRows = await executeD1("SELECT COUNT(*) as count FROM products;");
+    const categoriesRows = await executeD1("SELECT COUNT(*) as count FROM categories;");
+    const bannersRows = await executeD1("SELECT COUNT(*) as count FROM banners;");
 
-    const db = readDb();
-
-    if (Array.isArray(productsRows) && productsRows.length > 0) {
-      db.products = productsRows.map((r: any) => ({
-        id: String(r.id),
-        name: String(r.name || ""),
-        description: String(r.description || ""),
-        price: Number(r.price) || 0,
-        original_price: r.original_price ? Number(r.original_price) : undefined,
-        image: String(r.image || ""),
-        category: String(r.category || ""),
-        subCategory1: r.subCategory1 ? String(r.subCategory1) : undefined,
-        subCategory2: r.subCategory2 ? String(r.subCategory2) : undefined,
-        featured: Boolean(r.featured),
-        stock: r.stock !== null && r.stock !== undefined ? Number(r.stock) : undefined,
-        sku: r.sku ? String(r.sku) : undefined
-      }));
-    }
-
-    if (Array.isArray(categoriesRows) && categoriesRows.length > 0) {
-      db.categories = categoriesRows.map((r: any) => ({
-        id: String(r.id),
-        name: String(r.name || ""),
-        slug: String(r.slug || ""),
-        parentId: r.parentId ? String(r.parentId) : undefined,
-        isBrand: Boolean(r.isBrand)
-      }));
-    }
-
-    if (Array.isArray(bannersRows) && bannersRows.length > 0) {
-      db.banners = bannersRows.map((r: any) => ({
-        id: String(r.id),
-        image: String(r.image || ""),
-        title: r.title ? String(r.title) : undefined,
-        subtitle: r.subtitle ? String(r.subtitle) : undefined,
-        cta: r.cta ? String(r.cta) : undefined,
-        active: Boolean(r.active ?? true),
-        device: (r.device || "all") as any,
-        opacity: Number(r.opacity ?? 100)
-      }));
-    }
-
-    if (Array.isArray(settingsRows) && settingsRows.length > 0) {
-      db.settings = settingsRows.map((r: any) => ({
-        key: String(r.key || ""),
-        value: String(r.value || "")
-      }));
-    }
-
-    writeDb(db);
+    const counts = {
+      products: Number(productsRows?.[0]?.count ?? 0),
+      categories: Number(categoriesRows?.[0]?.count ?? 0),
+      banners: Number(bannersRows?.[0]?.count ?? 0),
+    };
 
     return res.json({
       ok: true,
-      message: `Dados importados do Cloudflare D1 com sucesso! (${productsRows.length} produtos, ${categoriesRows.length} categorias, ${bannersRows.length} banners).`,
-      counts: {
-        products: productsRows.length,
-        categories: categoriesRows.length,
-        banners: bannersRows.length
-      }
+      message: `Dados atuais no Cloudflare D1: ${counts.products} produtos, ${counts.categories} categorias, ${counts.banners} banners.`,
+      counts,
     });
   } catch (err: any) {
     console.error("[Pull from D1 Error]", err);
-    return res.status(500).json({
-      error: err.message || "Erro ao puxar dados do Cloudflare D1."
-    });
+    return res.status(500).json({ error: err.message || "Erro ao consultar o Cloudflare D1." });
   }
 });
 
@@ -770,171 +729,102 @@ app.post("/api/upload", (req, res) => {
 
 // --- PRODUCTS ---
 app.get("/api/products", async (req, res) => {
-  if (isCloudflareD1Configured()) {
-    try {
-      const rows = await executeD1("SELECT * FROM products;");
-      const products = rows.map((r: any) => ({
-        id: r.id,
-        name: r.name,
-        description: r.description || "",
-        price: Number(r.price) || 0,
-        original_price: r.original_price ? Number(r.original_price) : undefined,
-        image: r.image || "",
-        category: r.category || "",
-        subCategory1: r.subCategory1 || undefined,
-        subCategory2: r.subCategory2 || undefined,
-        featured: Boolean(r.featured),
-        stock: r.stock !== null && r.stock !== undefined ? Number(r.stock) : undefined,
-        sku: r.sku || undefined
-      }));
-      return res.json(products);
-    } catch (err: any) {
-      console.warn("[D1 Get Products Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
-    }
+  if (!ensureD1(res)) return;
+  try {
+    const rows = await executeD1("SELECT * FROM products;");
+    res.json(rows.map(mapProductRow));
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao carregar produtos do Cloudflare D1.");
   }
-  const db = readDb();
-  res.json(db.products);
 });
 
 app.post("/api/products", async (req, res) => {
+  if (!ensureD1(res)) return;
   const productData = req.body;
   const newProduct: Product = {
     ...productData,
     id: productData.id || crypto.randomUUID(),
     price: Number(productData.price) || 0,
     original_price: productData.original_price ? Number(productData.original_price) : undefined,
-    featured: !!productData.featured
+    featured: !!productData.featured,
   };
 
-  if (isCloudflareD1Configured()) {
-    try {
-      await executeD1(
-        `INSERT OR REPLACE INTO products (id, name, description, price, original_price, image, category, subCategory1, subCategory2, featured, stock, sku) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          newProduct.id,
-          newProduct.name,
-          newProduct.description || "",
-          newProduct.price,
-          newProduct.original_price || null,
-          newProduct.image || "",
-          newProduct.category || "",
-          newProduct.subCategory1 || null,
-          newProduct.subCategory2 || null,
-          newProduct.featured ? 1 : 0,
-          newProduct.stock ?? null,
-          newProduct.sku || null
-        ]
-      );
-    } catch (err: any) {
-      console.warn("[D1 Insert Product Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
-    }
+  try {
+    await upsertProduct(newProduct);
+    res.json([newProduct]);
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao salvar produto no Cloudflare D1.");
   }
-
-  const db = readDb();
-  db.products = db.products.filter(p => p.id !== newProduct.id);
-  db.products.push(newProduct);
-  writeDb(db);
-  res.json([newProduct]);
 });
 
 app.patch("/api/products/:id", async (req, res) => {
+  if (!ensureD1(res)) return;
   const { id } = req.params;
   const updates = req.body;
 
-  const db = readDb();
-  const index = db.products.findIndex(p => p.id === id);
-  let updated: Product;
+  try {
+    const existing = await getProductById(id);
+    let updated: Product;
 
-  if (index !== -1) {
-    db.products[index] = {
-      ...db.products[index],
-      ...updates,
-      price: updates.price !== undefined ? Number(updates.price) : db.products[index].price,
-      original_price: updates.original_price !== undefined ? (updates.original_price ? Number(updates.original_price) : undefined) : db.products[index].original_price,
-      featured: updates.featured !== undefined ? !!updates.featured : db.products[index].featured
-    };
-    updated = db.products[index];
-    writeDb(db);
-  } else {
-    updated = {
-      id,
-      name: updates.name || "",
-      description: updates.description || "",
-      price: Number(updates.price) || 0,
-      image: updates.image || "",
-      category: updates.category || "",
-      ...updates
-    };
-  }
-
-  if (isCloudflareD1Configured()) {
-    try {
-      await executeD1(
-        `INSERT OR REPLACE INTO products (id, name, description, price, original_price, image, category, subCategory1, subCategory2, featured, stock, sku) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          updated.id,
-          updated.name,
-          updated.description || "",
-          updated.price,
-          updated.original_price || null,
-          updated.image || "",
-          updated.category || "",
-          updated.subCategory1 || null,
-          updated.subCategory2 || null,
-          updated.featured ? 1 : 0,
-          updated.stock ?? null,
-          updated.sku || null
-        ]
-      );
-    } catch (err: any) {
-      console.warn("[D1 Update Product Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
+    if (existing) {
+      updated = {
+        ...existing,
+        ...updates,
+        id,
+        price: updates.price !== undefined ? Number(updates.price) : existing.price,
+        original_price:
+          updates.original_price !== undefined
+            ? (updates.original_price ? Number(updates.original_price) : undefined)
+            : existing.original_price,
+        featured: updates.featured !== undefined ? !!updates.featured : existing.featured,
+      };
+    } else {
+      updated = {
+        id,
+        name: updates.name || "",
+        description: updates.description || "",
+        price: Number(updates.price) || 0,
+        image: updates.image || "",
+        category: updates.category || "",
+        ...updates,
+        featured: !!updates.featured,
+      };
     }
-  }
 
-  res.json([updated]);
+    await upsertProduct(updated);
+    res.json([updated]);
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao atualizar produto no Cloudflare D1.");
+  }
 });
 
 app.delete("/api/products/:id", async (req, res) => {
-  const { id } = req.params;
-
-  if (isCloudflareD1Configured()) {
-    try {
-      await executeD1("DELETE FROM products WHERE id = ?;", [id]);
-    } catch (err: any) {
-      console.warn("[D1 Delete Product Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
-    }
+  if (!ensureD1(res)) return;
+  try {
+    await executeD1("DELETE FROM products WHERE id = ?;", [req.params.id]);
+    res.json({ ok: true });
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao remover produto no Cloudflare D1.");
   }
-
-  const db = readDb();
-  db.products = db.products.filter(p => p.id !== id);
-  writeDb(db);
-  res.json({ ok: true });
 });
 
 // --- CATEGORIES ---
+const toSlug = (s: string) =>
+  s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "");
+
 app.get("/api/categories", async (req, res) => {
-  if (isCloudflareD1Configured()) {
-    try {
-      const rows = await executeD1("SELECT * FROM categories;");
-      const categories = rows.map((r: any) => ({
-        id: r.id,
-        name: r.name,
-        slug: r.slug,
-        parentId: r.parentId || undefined,
-        isBrand: Boolean(r.isBrand)
-      }));
-      return res.json(categories);
-    } catch (err: any) {
-      console.warn("[D1 Get Categories Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
-    }
+  if (!ensureD1(res)) return;
+  try {
+    const rows = await executeD1("SELECT * FROM categories;");
+    res.json(rows.map(mapCategoryRow));
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao carregar categorias do Cloudflare D1.");
   }
-  const db = readDb();
-  res.json(db.categories);
 });
 
 app.post("/api/categories", async (req, res) => {
+  if (!ensureD1(res)) return;
   const { name, slug, parentId, isBrand } = req.body;
-  const toSlug = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "");
   const finalSlug = slug || toSlug(name || "categoria");
 
   const newCategory: Category = {
@@ -942,116 +832,73 @@ app.post("/api/categories", async (req, res) => {
     name,
     slug: finalSlug,
     parentId: parentId || undefined,
-    isBrand: !!isBrand
+    isBrand: !!isBrand,
   };
 
-  if (isCloudflareD1Configured()) {
-    try {
-      await executeD1(
-        `INSERT OR REPLACE INTO categories (id, name, slug, parentId, isBrand) VALUES (?, ?, ?, ?, ?)`,
-        [newCategory.id, newCategory.name, newCategory.slug, newCategory.parentId || null, newCategory.isBrand ? 1 : 0]
-      );
-    } catch (err: any) {
-      console.warn("[D1 Insert Category Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
-    }
+  try {
+    await upsertCategory(newCategory);
+    res.json([newCategory]);
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao salvar categoria no Cloudflare D1.");
   }
-
-  const db = readDb();
-  db.categories.push(newCategory);
-  writeDb(db);
-  res.json([newCategory]);
 });
 
 app.patch("/api/categories/:id", async (req, res) => {
+  if (!ensureD1(res)) return;
   const { id } = req.params;
   const updates = req.body;
-  const db = readDb();
-  const index = db.categories.findIndex(c => c.id === id);
 
-  const toSlug = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "");
-  
-  let updated: Category;
-  if (index !== -1) {
-    const name = updates.name !== undefined ? updates.name : db.categories[index].name;
-    const slug = updates.slug !== undefined ? updates.slug : (updates.name ? toSlug(updates.name) : db.categories[index].slug);
-    const parentId = updates.parentId !== undefined ? updates.parentId : db.categories[index].parentId;
-    const isBrand = updates.isBrand !== undefined ? !!updates.isBrand : db.categories[index].isBrand;
+  try {
+    const existing = await getCategoryById(id);
+    let updated: Category;
 
-    db.categories[index] = {
-      ...db.categories[index],
-      name,
-      slug,
-      parentId: parentId || undefined,
-      isBrand
-    };
-    updated = db.categories[index];
-    writeDb(db);
-  } else {
-    updated = {
-      id,
-      name: updates.name || "Categoria",
-      slug: updates.slug || toSlug(updates.name || "categoria"),
-      parentId: updates.parentId || undefined,
-      isBrand: !!updates.isBrand
-    };
-  }
+    if (existing) {
+      const name = updates.name !== undefined ? updates.name : existing.name;
+      const slug = updates.slug !== undefined ? updates.slug : (updates.name ? toSlug(updates.name) : existing.slug);
+      const parentId = updates.parentId !== undefined ? updates.parentId : existing.parentId;
+      const isBrand = updates.isBrand !== undefined ? !!updates.isBrand : existing.isBrand;
 
-  if (isCloudflareD1Configured()) {
-    try {
-      await executeD1(
-        `INSERT OR REPLACE INTO categories (id, name, slug, parentId, isBrand) VALUES (?, ?, ?, ?, ?)`,
-        [updated.id, updated.name, updated.slug, updated.parentId || null, updated.isBrand ? 1 : 0]
-      );
-    } catch (err: any) {
-      console.warn("[D1 Update Category Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
+      updated = { ...existing, name, slug, parentId: parentId || undefined, isBrand };
+    } else {
+      updated = {
+        id,
+        name: updates.name || "Categoria",
+        slug: updates.slug || toSlug(updates.name || "categoria"),
+        parentId: updates.parentId || undefined,
+        isBrand: !!updates.isBrand,
+      };
     }
-  }
 
-  res.json([updated]);
+    await upsertCategory(updated);
+    res.json([updated]);
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao atualizar categoria no Cloudflare D1.");
+  }
 });
 
 app.delete("/api/categories/:id", async (req, res) => {
-  const { id } = req.params;
-
-  if (isCloudflareD1Configured()) {
-    try {
-      await executeD1("DELETE FROM categories WHERE id = ?;", [id]);
-    } catch (err: any) {
-      console.warn("[D1 Delete Category Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
-    }
+  if (!ensureD1(res)) return;
+  try {
+    await executeD1("DELETE FROM categories WHERE id = ?;", [req.params.id]);
+    res.json({ ok: true });
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao remover categoria no Cloudflare D1.");
   }
-
-  const db = readDb();
-  db.categories = db.categories.filter(c => c.id !== id);
-  writeDb(db);
-  res.json({ ok: true });
 });
 
 // --- BANNERS ---
 app.get("/api/banners", async (req, res) => {
-  if (isCloudflareD1Configured()) {
-    try {
-      const rows = await executeD1("SELECT * FROM banners;");
-      const banners = rows.map((r: any) => ({
-        id: r.id,
-        image: r.image,
-        title: r.title || "",
-        subtitle: r.subtitle || "",
-        cta: r.cta || "",
-        active: Boolean(r.active),
-        device: r.device || "all",
-        opacity: r.opacity !== null && r.opacity !== undefined ? Number(r.opacity) : 100
-      }));
-      return res.json(banners);
-    } catch (err: any) {
-      console.warn("[D1 Get Banners Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
-    }
+  if (!ensureD1(res)) return;
+  try {
+    const rows = await executeD1("SELECT * FROM banners;");
+    res.json(rows.map(mapBannerRow));
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao carregar banners do Cloudflare D1.");
   }
-  const db = readDb();
-  res.json(db.banners);
 });
 
 app.post("/api/banners", async (req, res) => {
+  if (!ensureD1(res)) return;
   const bannerData = req.body;
   const newBanner: Banner = {
     id: bannerData.id || crypto.randomUUID(),
@@ -1061,136 +908,95 @@ app.post("/api/banners", async (req, res) => {
     cta: bannerData.cta || "",
     active: bannerData.active !== undefined ? !!bannerData.active : true,
     device: bannerData.device || "all",
-    opacity: bannerData.opacity !== undefined ? Number(bannerData.opacity) : 100
+    opacity: bannerData.opacity !== undefined ? Number(bannerData.opacity) : 100,
+    overlayOpacity: bannerData.overlayOpacity !== undefined ? Number(bannerData.overlayOpacity) : 60,
   };
 
-  if (isCloudflareD1Configured()) {
-    try {
-      await executeD1(
-        `INSERT OR REPLACE INTO banners (id, image, title, subtitle, cta, active, device, opacity) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [newBanner.id, newBanner.image, newBanner.title, newBanner.subtitle, newBanner.cta, newBanner.active ? 1 : 0, newBanner.device, newBanner.opacity]
-      );
-    } catch (err: any) {
-      console.warn("[D1 Insert Banner Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
-    }
+  try {
+    await upsertBanner(newBanner);
+    res.json([newBanner]);
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao salvar banner no Cloudflare D1.");
   }
-
-  const db = readDb();
-  db.banners.push(newBanner);
-  writeDb(db);
-  res.json([newBanner]);
 });
 
 app.patch("/api/banners/:id", async (req, res) => {
+  if (!ensureD1(res)) return;
   const { id } = req.params;
   const updates = req.body;
-  const db = readDb();
-  const index = db.banners.findIndex(b => b.id === id);
 
-  let updated: Banner;
-  if (index !== -1) {
-    db.banners[index] = {
-      ...db.banners[index],
-      ...updates,
-      active: updates.active !== undefined ? !!updates.active : db.banners[index].active,
-      opacity: updates.opacity !== undefined ? Number(updates.opacity) : db.banners[index].opacity
-    };
-    updated = db.banners[index];
-    writeDb(db);
-  } else {
-    updated = {
-      id,
-      image: updates.image || "",
-      title: updates.title || "",
-      subtitle: updates.subtitle || "",
-      cta: updates.cta || "",
-      active: updates.active !== undefined ? !!updates.active : true,
-      device: updates.device || "all",
-      opacity: updates.opacity !== undefined ? Number(updates.opacity) : 100
-    };
-  }
+  try {
+    const existing = await getBannerById(id);
+    let updated: Banner;
 
-  if (isCloudflareD1Configured()) {
-    try {
-      await executeD1(
-        `INSERT OR REPLACE INTO banners (id, image, title, subtitle, cta, active, device, opacity) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [updated.id, updated.image, updated.title, updated.subtitle, updated.cta, updated.active ? 1 : 0, updated.device, updated.opacity]
-      );
-    } catch (err: any) {
-      console.warn("[D1 Update Banner Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
+    if (existing) {
+      updated = {
+        ...existing,
+        ...updates,
+        id,
+        active: updates.active !== undefined ? !!updates.active : existing.active,
+        opacity: updates.opacity !== undefined ? Number(updates.opacity) : existing.opacity,
+        overlayOpacity: updates.overlayOpacity !== undefined ? Number(updates.overlayOpacity) : existing.overlayOpacity,
+      };
+    } else {
+      updated = {
+        id,
+        image: updates.image || "",
+        title: updates.title || "",
+        subtitle: updates.subtitle || "",
+        cta: updates.cta || "",
+        active: updates.active !== undefined ? !!updates.active : true,
+        device: updates.device || "all",
+        opacity: updates.opacity !== undefined ? Number(updates.opacity) : 100,
+        overlayOpacity: updates.overlayOpacity !== undefined ? Number(updates.overlayOpacity) : 60,
+      };
     }
-  }
 
-  res.json([updated]);
+    await upsertBanner(updated);
+    res.json([updated]);
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao atualizar banner no Cloudflare D1.");
+  }
 });
 
 app.delete("/api/banners/:id", async (req, res) => {
-  const { id } = req.params;
-
-  if (isCloudflareD1Configured()) {
-    try {
-      await executeD1("DELETE FROM banners WHERE id = ?;", [id]);
-    } catch (err: any) {
-      console.warn("[D1 Delete Banner Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
-    }
+  if (!ensureD1(res)) return;
+  try {
+    await executeD1("DELETE FROM banners WHERE id = ?;", [req.params.id]);
+    res.json({ ok: true });
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao remover banner no Cloudflare D1.");
   }
-
-  const db = readDb();
-  db.banners = db.banners.filter(b => b.id !== id);
-  writeDb(db);
-  res.json({ ok: true });
 });
 
 // --- SETTINGS ---
 app.get("/api/settings", async (req, res) => {
-  if (isCloudflareD1Configured()) {
-    try {
-      const rows = await executeD1("SELECT * FROM settings;");
-      if (rows && rows.length > 0) {
-        const settings = rows.map((r: any) => ({
-          key: r.key,
-          value: r.value
-        }));
-        return res.json(settings);
-      }
-    } catch (err: any) {
-      console.warn("[D1 Get Settings Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
-    }
+  if (!ensureD1(res)) return;
+  try {
+    const rows = await executeD1("SELECT * FROM settings;");
+    res.json(rows.map((r: any) => ({ key: r.key, value: r.value })));
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao carregar configurações do Cloudflare D1.");
   }
-  const db = readDb();
-  res.json(db.settings);
 });
 
 app.post("/api/settings", async (req, res) => {
+  if (!ensureD1(res)) return;
   const { key, value } = req.body;
-
-  if (isCloudflareD1Configured()) {
-    try {
-      await executeD1(
-        `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
-        [key, value]
-      );
-    } catch (err: any) {
-      console.warn("[D1 Insert Setting Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
-    }
+  try {
+    await executeD1(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`, [key, value]);
+    const rows = await executeD1("SELECT * FROM settings;");
+    res.json(rows.map((r: any) => ({ key: r.key, value: r.value })));
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao salvar configuração no Cloudflare D1.");
   }
-
-  const db = readDb();
-  const index = db.settings.findIndex(s => s.key === key);
-  if (index !== -1) {
-    db.settings[index].value = value;
-  } else {
-    db.settings.push({ key, value });
-  }
-  writeDb(db);
-  res.json(db.settings);
 });
 
 // Error handling middleware for API routes to ensure JSON format
 app.use("/api", (err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   console.error("[API Error]", err);
   res.status(err.status || 500).json({
-    error: err.message || "Ocorreu um erro interno no servidor."
+    error: err.message || "Ocorreu um erro interno no servidor.",
   });
 });
 
@@ -1200,17 +1006,16 @@ app.use("/api", (err: any, req: express.Request, res: express.Response, next: ex
 
 async function startServer() {
   if (isCloudflareD1Configured()) {
-    await initD1Schema();
-  } else {
     try {
-      const cloudflareData = await loadDbFromCloudflare();
-      if (cloudflareData && Array.isArray(cloudflareData.products)) {
-        writeDb(cloudflareData);
-        console.log("[Cloudflare] Successfully loaded and restored database state from Cloudflare on startup.");
-      }
+      await initD1Schema();
     } catch (err: any) {
-      console.warn("[Cloudflare Startup Load Notice]", err?.message || err);
+      console.warn("[Cloudflare D1 Init Warning]", err?.message || err);
     }
+  } else {
+    console.warn(
+      "\n⚠️  " + D1_NOT_CONFIGURED_MESSAGE +
+      "\n    Enquanto o D1 não estiver configurado, as rotas da API responderão 503 e a loja ficará sem dados.\n"
+    );
   }
 
   if (process.env.NODE_ENV !== "production") {
@@ -1229,7 +1034,11 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    console.log(`Database initialized at ${DB_PATH}`);
+    console.log(
+      isCloudflareD1Configured()
+        ? "Fonte de dados: Cloudflare D1"
+        : "Fonte de dados: NENHUMA (configure o Cloudflare D1 no .env)"
+    );
   });
 }
 
