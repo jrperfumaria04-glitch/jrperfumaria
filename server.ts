@@ -271,8 +271,8 @@ async function syncDbToCloudflare(dbData: JsonDatabase) {
         );
       }
       console.log("[Cloudflare D1 SQL] Sincronização de tabelas SQL concluída!");
-    } catch (err) {
-      console.error("[Cloudflare D1 SQL Sync Error]", err);
+    } catch (err: any) {
+      console.warn("[Cloudflare D1 SQL Sync Notice]", err?.message || err);
     }
   } else if (isCloudflareKVConfigured()) {
     const kvId = process.env.CLOUDFLARE_KV_NAMESPACE_ID;
@@ -290,8 +290,8 @@ async function syncDbToCloudflare(dbData: JsonDatabase) {
         }
       );
       console.log("[Cloudflare KV] Database sync completed!");
-    } catch (err) {
-      console.error("[Cloudflare KV Sync Error]", err);
+    } catch (err: any) {
+      console.warn("[Cloudflare KV Sync Notice]", err?.message || err);
     }
   }
 }
@@ -321,8 +321,8 @@ async function loadDbFromCloudflare(): Promise<JsonDatabase | null> {
         console.log("[Cloudflare D1] Database successfully loaded from Cloudflare!");
         return JSON.parse(data.result[0].results[0].json_data);
       }
-    } catch (err) {
-      console.error("[Cloudflare D1 Load Error]", err);
+    } catch (err: any) {
+      console.warn("[Cloudflare D1 Load Notice]", err?.message || err);
     }
   } else if (isCloudflareKVConfigured()) {
     const kvId = process.env.CLOUDFLARE_KV_NAMESPACE_ID;
@@ -341,8 +341,8 @@ async function loadDbFromCloudflare(): Promise<JsonDatabase | null> {
         console.log("[Cloudflare KV] Database successfully loaded from Cloudflare!");
         return JSON.parse(text);
       }
-    } catch (err) {
-      console.error("[Cloudflare KV Load Error]", err);
+    } catch (err: any) {
+      console.warn("[Cloudflare KV Load Notice]", err?.message || err);
     }
   }
 
@@ -765,8 +765,8 @@ app.get("/api/products", async (req, res) => {
         sku: r.sku || undefined
       }));
       return res.json(products);
-    } catch (err) {
-      console.error("[D1 Get Products Error]", err);
+    } catch (err: any) {
+      console.warn("[D1 Get Products Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
     }
   }
   const db = readDb();
@@ -802,8 +802,8 @@ app.post("/api/products", async (req, res) => {
           newProduct.sku || null
         ]
       );
-    } catch (err) {
-      console.error("[D1 Insert Product Error]", err);
+    } catch (err: any) {
+      console.warn("[D1 Insert Product Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
     }
   }
 
@@ -863,8 +863,8 @@ app.patch("/api/products/:id", async (req, res) => {
           updated.sku || null
         ]
       );
-    } catch (err) {
-      console.error("[D1 Update Product Error]", err);
+    } catch (err: any) {
+      console.warn("[D1 Update Product Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
     }
   }
 
@@ -877,8 +877,8 @@ app.delete("/api/products/:id", async (req, res) => {
   if (isCloudflareD1Configured()) {
     try {
       await executeD1("DELETE FROM products WHERE id = ?;", [id]);
-    } catch (err) {
-      console.error("[D1 Delete Product Error]", err);
+    } catch (err: any) {
+      console.warn("[D1 Delete Product Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
     }
   }
 
@@ -901,8 +901,8 @@ app.get("/api/categories", async (req, res) => {
         isBrand: Boolean(r.isBrand)
       }));
       return res.json(categories);
-    } catch (err) {
-      console.error("[D1 Get Categories Error]", err);
+    } catch (err: any) {
+      console.warn("[D1 Get Categories Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
     }
   }
   const db = readDb();
@@ -928,8 +928,8 @@ app.post("/api/categories", async (req, res) => {
         `INSERT OR REPLACE INTO categories (id, name, slug, parentId, isBrand) VALUES (?, ?, ?, ?, ?)`,
         [newCategory.id, newCategory.name, newCategory.slug, newCategory.parentId || null, newCategory.isBrand ? 1 : 0]
       );
-    } catch (err) {
-      console.error("[D1 Insert Category Error]", err);
+    } catch (err: any) {
+      console.warn("[D1 Insert Category Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
     }
   }
 
@@ -979,8 +979,8 @@ app.patch("/api/categories/:id", async (req, res) => {
         `INSERT OR REPLACE INTO categories (id, name, slug, parentId, isBrand) VALUES (?, ?, ?, ?, ?)`,
         [updated.id, updated.name, updated.slug, updated.parentId || null, updated.isBrand ? 1 : 0]
       );
-    } catch (err) {
-      console.error("[D1 Update Category Error]", err);
+    } catch (err: any) {
+      console.warn("[D1 Update Category Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
     }
   }
 
@@ -993,8 +993,8 @@ app.delete("/api/categories/:id", async (req, res) => {
   if (isCloudflareD1Configured()) {
     try {
       await executeD1("DELETE FROM categories WHERE id = ?;", [id]);
-    } catch (err) {
-      console.error("[D1 Delete Category Error]", err);
+    } catch (err: any) {
+      console.warn("[D1 Delete Category Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
     }
   }
 
@@ -1020,8 +1020,8 @@ app.get("/api/banners", async (req, res) => {
         opacity: r.opacity !== null && r.opacity !== undefined ? Number(r.opacity) : 100
       }));
       return res.json(banners);
-    } catch (err) {
-      console.error("[D1 Get Banners Error]", err);
+    } catch (err: any) {
+      console.warn("[D1 Get Banners Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
     }
   }
   const db = readDb();
@@ -1047,8 +1047,8 @@ app.post("/api/banners", async (req, res) => {
         `INSERT OR REPLACE INTO banners (id, image, title, subtitle, cta, active, device, opacity) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [newBanner.id, newBanner.image, newBanner.title, newBanner.subtitle, newBanner.cta, newBanner.active ? 1 : 0, newBanner.device, newBanner.opacity]
       );
-    } catch (err) {
-      console.error("[D1 Insert Banner Error]", err);
+    } catch (err: any) {
+      console.warn("[D1 Insert Banner Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
     }
   }
 
@@ -1093,8 +1093,8 @@ app.patch("/api/banners/:id", async (req, res) => {
         `INSERT OR REPLACE INTO banners (id, image, title, subtitle, cta, active, device, opacity) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [updated.id, updated.image, updated.title, updated.subtitle, updated.cta, updated.active ? 1 : 0, updated.device, updated.opacity]
       );
-    } catch (err) {
-      console.error("[D1 Update Banner Error]", err);
+    } catch (err: any) {
+      console.warn("[D1 Update Banner Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
     }
   }
 
@@ -1107,8 +1107,8 @@ app.delete("/api/banners/:id", async (req, res) => {
   if (isCloudflareD1Configured()) {
     try {
       await executeD1("DELETE FROM banners WHERE id = ?;", [id]);
-    } catch (err) {
-      console.error("[D1 Delete Banner Error]", err);
+    } catch (err: any) {
+      console.warn("[D1 Delete Banner Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
     }
   }
 
@@ -1130,8 +1130,8 @@ app.get("/api/settings", async (req, res) => {
         }));
         return res.json(settings);
       }
-    } catch (err) {
-      console.error("[D1 Get Settings Error]", err);
+    } catch (err: any) {
+      console.warn("[D1 Get Settings Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
     }
   }
   const db = readDb();
@@ -1147,8 +1147,8 @@ app.post("/api/settings", async (req, res) => {
         `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
         [key, value]
       );
-    } catch (err) {
-      console.error("[D1 Insert Setting Error]", err);
+    } catch (err: any) {
+      console.warn("[D1 Insert Setting Notice] D1 não acessível. Usando banco de dados local:", err?.message || err);
     }
   }
 
@@ -1185,8 +1185,8 @@ async function startServer() {
         writeDb(cloudflareData);
         console.log("[Cloudflare] Successfully loaded and restored database state from Cloudflare on startup.");
       }
-    } catch (err) {
-      console.error("[Cloudflare Startup Load Error]", err);
+    } catch (err: any) {
+      console.warn("[Cloudflare Startup Load Notice]", err?.message || err);
     }
   }
 
