@@ -549,6 +549,22 @@ async function getProductById(id: string): Promise<Product | null> {
   return rows?.[0] ? mapProductRow(rows[0]) : null;
 }
 
+// Gera o próximo id sequencial de produto no formato "p-<n>", continuando a
+// partir do maior número já existente (aceita "8" ou "p-105"). IDs que não são
+// numéricos (ex: UUIDs antigos) são ignorados no cálculo.
+async function nextProductId(): Promise<string> {
+  const rows = await executeD1("SELECT id FROM products;");
+  let max = 0;
+  for (const r of rows) {
+    const match = String(r.id).match(/^(?:p-)?(\d+)$/);
+    if (match) {
+      const n = parseInt(match[1], 10);
+      if (n > max) max = n;
+    }
+  }
+  return `p-${max + 1}`;
+}
+
 async function upsertCategory(c: Category) {
   await executeD1(
     `INSERT OR REPLACE INTO categories (id, name, slug, parentId, isBrand) VALUES (?, ?, ?, ?, ?)`,
@@ -741,15 +757,16 @@ app.get("/api/products", async (req, res) => {
 app.post("/api/products", async (req, res) => {
   if (!ensureD1(res)) return;
   const productData = req.body;
-  const newProduct: Product = {
-    ...productData,
-    id: productData.id || crypto.randomUUID(),
-    price: Number(productData.price) || 0,
-    original_price: productData.original_price ? Number(productData.original_price) : undefined,
-    featured: !!productData.featured,
-  };
 
   try {
+    const id = productData.id || (await nextProductId());
+    const newProduct: Product = {
+      ...productData,
+      id,
+      price: Number(productData.price) || 0,
+      original_price: productData.original_price ? Number(productData.original_price) : undefined,
+      featured: !!productData.featured,
+    };
     await upsertProduct(newProduct);
     res.json([newProduct]);
   } catch (err: any) {
