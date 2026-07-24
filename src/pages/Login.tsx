@@ -175,8 +175,8 @@ const Login = () => {
         </p>
 
         <p className="text-center text-[10px] uppercase tracking-widest text-slate-400 bg-slate-50 border border-black/5 p-3 rounded-none">
-          Acesso Admin de Teste:<br />
-          <span className="font-bold text-slate-700">admin@jr.com</span> / <span className="font-bold text-slate-700">admin123</span>
+          Acesso Admin Exclusivo:<br />
+          <span className="font-bold text-slate-700">jrperfumaria04@gmail.com</span> / <span className="font-bold text-slate-700">joaoalexsanderro@gmai.com</span>
         </p>
       </div>
     </div>

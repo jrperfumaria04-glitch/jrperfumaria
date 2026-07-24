@@ -33,7 +33,11 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const ADMIN_EMAILS = ["jrperfumaria04@gmail.com", "joaoalexsanderro@gmail.com"];
+const ADMIN_EMAILS = [
+  "jrperfumaria04@gmail.com",
+  "joaoalexsanderro@gmai.com",
+  "joaoalexsanderro@gmail.com"
+];
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -79,19 +83,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const login = useCallback(async (email: string, password: string) => {
     const formattedEmail = email.trim().toLowerCase();
 
-    // Bypass for predefined test admin credentials to ensure the user can always log in and test
-    if (formattedEmail === "admin@jr.com" && password === "admin123") {
-      setUser({
-        uid: "mock-uid-admin-jr",
-        email: "admin@jr.com",
-        isAdmin: true
-      });
-      return { success: true };
-    }
-
     if (!isFirebaseConfigured || !auth) {
       // Mock mode fallback for smooth immediate development preview
-      const isAdminUser = ADMIN_EMAILS.includes(formattedEmail) || formattedEmail === "admin@jr.com";
+      const isAdminUser = ADMIN_EMAILS.includes(formattedEmail);
       if (password.length >= 4) {
         setUser({
           uid: "mock-uid-" + formattedEmail.replace(/[^a-zA-Z0-9]/g, ""),
@@ -114,16 +108,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const register = useCallback(async (email: string, password: string) => {
     const formattedEmail = email.trim().toLowerCase();
-
-    // Bypass for predefined test admin credentials to ensure they can always "register" or login
-    if (formattedEmail === "admin@jr.com") {
-      setUser({
-        uid: "mock-uid-admin-jr",
-        email: "admin@jr.com",
-        isAdmin: true
-      });
-      return { success: true };
-    }
 
     if (!isFirebaseConfigured || !auth) {
       // Mock mode fallback
