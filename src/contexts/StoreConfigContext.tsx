@@ -118,9 +118,9 @@ export const StoreConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
               storeName: settings.storeName || defaultConfig.storeName,
               whatsappNumber: settings.whatsappNumber || defaultConfig.whatsappNumber,
               promoMessage: settings.promoMessage || defaultConfig.promoMessage,
-              banners: migratedBanners.length ? migratedBanners : defaultBanners,
-              categories: categories.length ? categories : mockCategories,
-              products: migratedProducts.length ? migratedProducts : mockProducts,
+              banners: Array.isArray(migratedBanners) ? migratedBanners : defaultBanners,
+              categories: Array.isArray(categories) ? categories : mockCategories,
+              products: Array.isArray(migratedProducts) ? migratedProducts : mockProducts,
               footer,
             });
 

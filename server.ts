@@ -95,21 +95,20 @@ async function uploadToCloudflareR2(filePath: string, filename: string, mimeType
 }
 
 function isCloudflareD1Configured(): boolean {
-  return Boolean(
-    process.env.CLOUDFLARE_ACCOUNT_ID &&
-    (process.env.CLOUDFLARE_API_TOKEN || process.env.CLOUDFLARE_API_KEY) &&
-    process.env.CLOUDFLARE_D1_DATABASE_ID
-  );
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
+  const token = (process.env.CLOUDFLARE_API_TOKEN || process.env.CLOUDFLARE_API_KEY)?.trim();
+  const d1Id = process.env.CLOUDFLARE_D1_DATABASE_ID?.trim();
+  return Boolean(accountId && token && d1Id);
 }
 
 const D1_NOT_CONFIGURED_MESSAGE =
   "Cloudflare D1 não está configurado. Defina CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN e CLOUDFLARE_D1_DATABASE_ID no arquivo .env para que a loja funcione.";
 
 async function executeD1(sql: string, params: any[] = []): Promise<any[]> {
-  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
-  const token = process.env.CLOUDFLARE_API_TOKEN || process.env.CLOUDFLARE_API_KEY;
-  const d1Id = process.env.CLOUDFLARE_D1_DATABASE_ID;
-  const email = process.env.CLOUDFLARE_AUTH_EMAIL || process.env.CLOUDFLARE_EMAIL;
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
+  const token = (process.env.CLOUDFLARE_API_TOKEN || process.env.CLOUDFLARE_API_KEY)?.trim();
+  const d1Id = process.env.CLOUDFLARE_D1_DATABASE_ID?.trim();
+  const email = (process.env.CLOUDFLARE_AUTH_EMAIL || process.env.CLOUDFLARE_EMAIL)?.trim();
 
   if (!accountId || !token || !d1Id) {
     throw new Error(D1_NOT_CONFIGURED_MESSAGE);
@@ -119,7 +118,7 @@ async function executeD1(sql: string, params: any[] = []): Promise<any[]> {
     "Content-Type": "application/json",
   };
 
-  if (email) {
+  if (email && email.length > 0) {
     headers["X-Auth-Email"] = email;
     headers["X-Auth-Key"] = token;
   } else {
@@ -135,12 +134,19 @@ async function executeD1(sql: string, params: any[] = []): Promise<any[]> {
     }
   );
 
-  const json: any = await res.json();
-  if (!json.success) {
-    const rawErr = json.errors?.[0]?.message || "Cloudflare D1 query failed";
-    if (rawErr.toLowerCase().includes("authentication error")) {
+  const resText = await res.text();
+  let json: any;
+  try {
+    json = JSON.parse(resText);
+  } catch (err) {
+    throw new Error(`Resposta inválida da API Cloudflare (${res.status}): ${resText.slice(0, 150)}`);
+  }
+
+  if (!res.ok || !json.success) {
+    const rawErr = json.errors?.[0]?.message || `HTTP ${res.status} error`;
+    if (res.status === 401 || rawErr.toLowerCase().includes("authentication error")) {
       throw new Error(
-        "Erro de Autenticação na API do Cloudflare D1: O token 'CLOUDFLARE_API_TOKEN' não possui a permissão 'Account -> D1 -> Edit' ou as credenciais estão incorretas. Verifique seu API Token."
+        "Erro de Autenticação na API do Cloudflare D1: O token 'CLOUDFLARE_API_TOKEN' não possui a permissão necessária para o D1 ou o 'CLOUDFLARE_AUTH_EMAIL' é obrigatório para Global API Key."
       );
     }
     throw new Error(rawErr);
@@ -419,32 +425,19 @@ async function migrateD1Schema() {
   }
 }
 
-// Insert the default catalog. Uses INSERT OR IGNORE so it never overwrites
-// data that already exists in D1 (only fills in what is missing).
-async function seedDefaultsToD1() {
-  for (const p of DEFAULT_DB.products) {
-    await executeD1(
-      `INSERT OR IGNORE INTO products (id, name, description, price, original_price, image, category, subCategory1, subCategory2, featured, stock, sku, brand, categories, expirationDate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [p.id, p.name, p.description || "", p.price, p.original_price ?? null, p.image || "", p.category || "", p.subCategory1 || null, p.subCategory2 || null, p.featured ? 1 : 0, p.stock ?? null, p.sku || null, p.brand || null, p.categories && p.categories.length ? JSON.stringify(p.categories) : null, p.expirationDate || null]
-    );
+// Syncs a JsonDatabase object (products, categories, banners, settings) into Cloudflare D1
+async function syncLocalDbToD1(dbData: JsonDatabase) {
+  for (const p of dbData.products || []) {
+    await upsertProduct(p);
   }
-  for (const c of DEFAULT_DB.categories) {
-    await executeD1(
-      `INSERT OR IGNORE INTO categories (id, name, slug, parentId, isBrand) VALUES (?, ?, ?, ?, ?)`,
-      [c.id, c.name, c.slug, c.parentId || null, c.isBrand ? 1 : 0]
-    );
+  for (const c of dbData.categories || []) {
+    await upsertCategory(c);
   }
-  for (const b of DEFAULT_DB.banners) {
-    await executeD1(
-      `INSERT OR IGNORE INTO banners (id, image, title, subtitle, cta, active, device, opacity, overlayOpacity) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [b.id, b.image, b.title, b.subtitle, b.cta, b.active ? 1 : 0, b.device || "all", b.opacity ?? 100, b.overlayOpacity ?? 60]
-    );
+  for (const b of dbData.banners || []) {
+    await upsertBanner(b);
   }
-  for (const s of DEFAULT_DB.settings) {
-    await executeD1(
-      `INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`,
-      [s.key, s.value]
-    );
+  for (const s of dbData.settings || []) {
+    await executeD1(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`, [s.key, s.value]);
   }
 }
 
@@ -457,9 +450,10 @@ async function initD1Schema() {
 
   const existingProducts = await executeD1("SELECT COUNT(*) as count FROM products;");
   if (existingProducts?.[0]?.count === 0) {
-    console.log("[Cloudflare D1] Banco vazio — semeando catálogo padrão...");
-    await seedDefaultsToD1();
-    console.log("[Cloudflare D1] Catálogo padrão gravado no D1!");
+    console.log("[Cloudflare D1] Banco D1 vazio — sincronizando dados locais...");
+    const localDb = readLocalDb();
+    await syncLocalDbToD1(localDb);
+    console.log("[Cloudflare D1] Dados locais gravados no Cloudflare D1 com sucesso!");
   }
 }
 
@@ -664,9 +658,19 @@ app.get("/api/cloudflare/status", async (req, res) => {
   let d1Working = false;
   let d1Error = "";
 
+  let d1Counts = { products: 0, categories: 0, banners: 0 };
+
   if (d1Ok) {
     try {
-      await executeD1("SELECT 1;");
+      const productsRes = await executeD1("SELECT COUNT(*) as count FROM products;");
+      const categoriesRes = await executeD1("SELECT COUNT(*) as count FROM categories;");
+      const bannersRes = await executeD1("SELECT COUNT(*) as count FROM banners;");
+
+      d1Counts = {
+        products: Number(productsRes?.[0]?.count ?? 0),
+        categories: Number(categoriesRes?.[0]?.count ?? 0),
+        banners: Number(bannersRes?.[0]?.count ?? 0),
+      };
       d1Working = true;
     } catch (err: any) {
       d1Error = err.message || "Falha na conexão com D1 API";
@@ -685,6 +689,7 @@ app.get("/api/cloudflare/status", async (req, res) => {
       working: d1Working,
       databaseId: process.env.CLOUDFLARE_D1_DATABASE_ID || "",
       error: d1Error,
+      counts: d1Counts,
     },
     accountId: process.env.CLOUDFLARE_ACCOUNT_ID ? "****" + process.env.CLOUDFLARE_ACCOUNT_ID.slice(-4) : "",
   });
@@ -702,13 +707,14 @@ app.post("/api/cloudflare/init-d1", async (req, res) => {
   }
 });
 
-// Populate D1 with the default catalog (only inserts rows that are missing).
+// Sync local preview catalog/data into Cloudflare D1
 app.post("/api/cloudflare/push-to-d1", async (req, res) => {
   if (!ensureD1(res)) return;
   try {
     await createD1Tables();
     await migrateD1Schema();
-    await seedDefaultsToD1();
+    const localDb = readLocalDb();
+    await syncLocalDbToD1(localDb);
 
     const productsRows = await executeD1("SELECT COUNT(*) as count FROM products;");
     const categoriesRows = await executeD1("SELECT COUNT(*) as count FROM categories;");
@@ -716,32 +722,45 @@ app.post("/api/cloudflare/push-to-d1", async (req, res) => {
 
     return res.json({
       ok: true,
-      message: `Catálogo padrão garantido no Cloudflare D1 (itens ausentes inseridos). Total: ${productsRows?.[0]?.count ?? 0} produtos, ${categoriesRows?.[0]?.count ?? 0} categorias, ${bannersRows?.[0]?.count ?? 0} banners.`,
+      message: `Dados da loja sincronizados para o Cloudflare D1 com sucesso! Total no D1: ${productsRows?.[0]?.count ?? 0} produtos, ${categoriesRows?.[0]?.count ?? 0} categorias, ${bannersRows?.[0]?.count ?? 0} banners.`,
     });
   } catch (err: any) {
     console.error("[Push to D1 Error]", err);
-    return res.status(500).json({ error: err.message || "Erro ao popular o Cloudflare D1." });
+    return res.status(500).json({ error: err.message || "Erro ao enviar dados para o Cloudflare D1." });
   }
 });
 
-// Report the current record counts stored in Cloudflare D1.
+// Import data from Cloudflare D1 and save to local storage
 app.post("/api/cloudflare/pull-from-d1", async (req, res) => {
   if (!ensureD1(res)) return;
   try {
-    const productsRows = await executeD1("SELECT COUNT(*) as count FROM products;");
-    const categoriesRows = await executeD1("SELECT COUNT(*) as count FROM categories;");
-    const bannersRows = await executeD1("SELECT COUNT(*) as count FROM banners;");
+    const productsRows = await executeD1("SELECT * FROM products;");
+    const categoriesRows = await executeD1("SELECT * FROM categories;");
+    const bannersRows = await executeD1("SELECT * FROM banners;");
+    const settingsRows = await executeD1("SELECT * FROM settings;");
 
-    const counts = {
-      products: Number(productsRows?.[0]?.count ?? 0),
-      categories: Number(categoriesRows?.[0]?.count ?? 0),
-      banners: Number(bannersRows?.[0]?.count ?? 0),
+    const d1Products = productsRows.map(mapProductRow);
+    const d1Categories = categoriesRows.map(mapCategoryRow);
+    const d1Banners = bannersRows.map(mapBannerRow);
+    const d1Settings = settingsRows.map((r: any) => ({ key: r.key, value: r.value }));
+
+    const localDb: JsonDatabase = {
+      products: d1Products,
+      categories: d1Categories,
+      banners: d1Banners,
+      settings: d1Settings,
     };
+
+    writeLocalDb(localDb);
 
     return res.json({
       ok: true,
-      message: `Dados atuais no Cloudflare D1: ${counts.products} produtos, ${counts.categories} categorias, ${counts.banners} banners.`,
-      counts,
+      message: `Dados importados do Cloudflare D1 com sucesso! Total: ${d1Products.length} produtos, ${d1Categories.length} categorias, ${d1Banners.length} banners.`,
+      counts: {
+        products: d1Products.length,
+        categories: d1Categories.length,
+        banners: d1Banners.length,
+      },
     });
   } catch (err: any) {
     console.error("[Pull from D1 Error]", err);
