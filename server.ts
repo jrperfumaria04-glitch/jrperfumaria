@@ -425,18 +425,18 @@ async function migrateD1Schema() {
   }
 }
 
-// Syncs a JsonDatabase object (products, categories, banners, settings) into Cloudflare D1
-async function syncLocalDbToD1(dbData: JsonDatabase) {
-  for (const p of dbData.products || []) {
+// Seeds the default catalog directly into Cloudflare D1
+async function seedDefaultCatalogToD1() {
+  for (const p of DEFAULT_DB.products) {
     await upsertProduct(p);
   }
-  for (const c of dbData.categories || []) {
+  for (const c of DEFAULT_DB.categories) {
     await upsertCategory(c);
   }
-  for (const b of dbData.banners || []) {
+  for (const b of DEFAULT_DB.banners) {
     await upsertBanner(b);
   }
-  for (const s of dbData.settings || []) {
+  for (const s of DEFAULT_DB.settings) {
     await executeD1(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`, [s.key, s.value]);
   }
 }
@@ -450,10 +450,9 @@ async function initD1Schema() {
 
   const existingProducts = await executeD1("SELECT COUNT(*) as count FROM products;");
   if (existingProducts?.[0]?.count === 0) {
-    console.log("[Cloudflare D1] Banco D1 vazio — sincronizando dados locais...");
-    const localDb = readLocalDb();
-    await syncLocalDbToD1(localDb);
-    console.log("[Cloudflare D1] Dados locais gravados no Cloudflare D1 com sucesso!");
+    console.log("[Cloudflare D1] Banco D1 vazio — gravando catálogo inicial no Cloudflare D1...");
+    await seedDefaultCatalogToD1();
+    console.log("[Cloudflare D1] Catálogo inicial gravado diretamente no Cloudflare D1!");
   }
 }
 
@@ -583,43 +582,10 @@ async function getBannerById(id: string): Promise<Banner | null> {
   return rows?.[0] ? mapBannerRow(rows[0]) : null;
 }
 
-const LOCAL_DB_FILE = path.join(UPLOADS_DIR, "db.json");
-
-function readLocalDb(): JsonDatabase {
-  if (fs.existsSync(LOCAL_DB_FILE)) {
-    try {
-      const data = fs.readFileSync(LOCAL_DB_FILE, "utf-8");
-      const parsed = JSON.parse(data);
-      return {
-        products: parsed.products || DEFAULT_DB.products,
-        categories: parsed.categories || DEFAULT_DB.categories,
-        banners: parsed.banners || DEFAULT_DB.banners,
-        settings: parsed.settings || DEFAULT_DB.settings || [],
-      };
-    } catch (err) {
-      console.error("[Local DB] Read error, using DEFAULT_DB:", err);
-    }
-  } else {
-    try {
-      fs.writeFileSync(LOCAL_DB_FILE, JSON.stringify(DEFAULT_DB, null, 2), "utf-8");
-    } catch (err) {
-      console.error("[Local DB] Initial seed error:", err);
-    }
-  }
-  return DEFAULT_DB;
-}
-
-function writeLocalDb(dbData: JsonDatabase) {
-  try {
-    fs.writeFileSync(LOCAL_DB_FILE, JSON.stringify(dbData, null, 2), "utf-8");
-  } catch (err) {
-    console.error("[Local DB] Write error:", err);
-  }
-}
-
 // Express guard: check if D1 is configured
 function ensureD1(res: express.Response): boolean {
   if (!isCloudflareD1Configured()) {
+    res.status(503).json({ error: D1_NOT_CONFIGURED_MESSAGE });
     return false;
   }
   return true;
@@ -707,14 +673,13 @@ app.post("/api/cloudflare/init-d1", async (req, res) => {
   }
 });
 
-// Sync local preview catalog/data into Cloudflare D1
+// Sync initial catalog into Cloudflare D1
 app.post("/api/cloudflare/push-to-d1", async (req, res) => {
   if (!ensureD1(res)) return;
   try {
     await createD1Tables();
     await migrateD1Schema();
-    const localDb = readLocalDb();
-    await syncLocalDbToD1(localDb);
+    await seedDefaultCatalogToD1();
 
     const productsRows = await executeD1("SELECT COUNT(*) as count FROM products;");
     const categoriesRows = await executeD1("SELECT COUNT(*) as count FROM categories;");
@@ -722,7 +687,7 @@ app.post("/api/cloudflare/push-to-d1", async (req, res) => {
 
     return res.json({
       ok: true,
-      message: `Dados da loja sincronizados para o Cloudflare D1 com sucesso! Total no D1: ${productsRows?.[0]?.count ?? 0} produtos, ${categoriesRows?.[0]?.count ?? 0} categorias, ${bannersRows?.[0]?.count ?? 0} banners.`,
+      message: `Catálogo padrão enviado para o Cloudflare D1 com sucesso! Total no D1: ${productsRows?.[0]?.count ?? 0} produtos, ${categoriesRows?.[0]?.count ?? 0} categorias, ${bannersRows?.[0]?.count ?? 0} banners.`,
     });
   } catch (err: any) {
     console.error("[Push to D1 Error]", err);
@@ -730,7 +695,7 @@ app.post("/api/cloudflare/push-to-d1", async (req, res) => {
   }
 });
 
-// Import data from Cloudflare D1 and save to local storage
+// Import and view current data directly from Cloudflare D1
 app.post("/api/cloudflare/pull-from-d1", async (req, res) => {
   if (!ensureD1(res)) return;
   try {
@@ -744,22 +709,19 @@ app.post("/api/cloudflare/pull-from-d1", async (req, res) => {
     const d1Banners = bannersRows.map(mapBannerRow);
     const d1Settings = settingsRows.map((r: any) => ({ key: r.key, value: r.value }));
 
-    const localDb: JsonDatabase = {
-      products: d1Products,
-      categories: d1Categories,
-      banners: d1Banners,
-      settings: d1Settings,
-    };
-
-    writeLocalDb(localDb);
-
     return res.json({
       ok: true,
-      message: `Dados importados do Cloudflare D1 com sucesso! Total: ${d1Products.length} produtos, ${d1Categories.length} categorias, ${d1Banners.length} banners.`,
+      message: `Dados do Cloudflare D1 consultados com sucesso! Total: ${d1Products.length} produtos, ${d1Categories.length} categorias, ${d1Banners.length} banners.`,
       counts: {
         products: d1Products.length,
         categories: d1Categories.length,
         banners: d1Banners.length,
+      },
+      data: {
+        products: d1Products,
+        categories: d1Categories,
+        banners: d1Banners,
+        settings: d1Settings,
       },
     });
   } catch (err: any) {
@@ -768,7 +730,7 @@ app.post("/api/cloudflare/pull-from-d1", async (req, res) => {
   }
 });
 
-// Upload endpoint
+// Upload endpoint - strictly Cloudflare R2
 app.post("/api/upload", (req, res) => {
   upload.single("file")(req, res, async (err) => {
     if (err) {
@@ -779,162 +741,106 @@ app.post("/api/upload", (req, res) => {
       return res.status(400).json({ error: "Nenhum arquivo enviado." });
     }
 
-    if (isCloudflareR2Configured()) {
-      try {
-        console.log(`[Cloudflare R2] Uploading ${req.file.filename}...`);
-        const r2Url = await uploadToCloudflareR2(req.file.path, req.file.filename, req.file.mimetype);
-        console.log(`[Cloudflare R2] Upload success: ${r2Url}`);
-        return res.json({ url: r2Url, filename: req.file.filename, storage: "cloudflare_r2" });
-      } catch (r2Err: any) {
-        console.error("[Cloudflare R2 Upload Error, falling back to local]", r2Err);
-      }
+    if (!isCloudflareR2Configured()) {
+      return res.status(503).json({
+        error: "Cloudflare R2 não está configurado. Configure as variáveis CLOUDFLARE_R2_BUCKET_NAME, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_R2_ACCESS_KEY_ID e CLOUDFLARE_R2_SECRET_ACCESS_KEY no .env para fazer upload de imagens.",
+      });
     }
 
-    const url = `/uploads/${req.file.filename}`;
-    res.json({ url, filename: req.file.filename, storage: "local" });
+    try {
+      console.log(`[Cloudflare R2] Enviando ${req.file.filename} para o R2...`);
+      const r2Url = await uploadToCloudflareR2(req.file.path, req.file.filename, req.file.mimetype);
+      console.log(`[Cloudflare R2] Upload com sucesso: ${r2Url}`);
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch {}
+      return res.json({ url: r2Url, filename: req.file.filename, storage: "cloudflare_r2" });
+    } catch (r2Err: any) {
+      console.error("[Cloudflare R2 Upload Error]", r2Err);
+      return res.status(500).json({ error: `Erro ao enviar imagem para o Cloudflare R2: ${r2Err.message || r2Err}` });
+    }
   });
 });
 
 // --- PRODUCTS ---
 app.get("/api/products", async (req, res) => {
-  if (isCloudflareD1Configured()) {
-    try {
-      const rows = await executeD1("SELECT * FROM products;");
-      return res.json(rows.map(mapProductRow));
-    } catch (err: any) {
-      console.error("[D1 Products Error, falling back to local DB]", err);
-    }
+  if (!ensureD1(res)) return;
+  try {
+    const rows = await executeD1("SELECT * FROM products;");
+    return res.json(rows.map(mapProductRow));
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao buscar produtos do Cloudflare D1.");
   }
-  const dbData = readLocalDb();
-  res.json(dbData.products);
 });
 
 app.post("/api/products", async (req, res) => {
+  if (!ensureD1(res)) return;
   const productData = req.body;
-
-  if (isCloudflareD1Configured()) {
-    try {
-      const id = productData.id || (await nextProductId());
-      const newProduct: Product = {
-        ...productData,
-        id,
-        price: Number(productData.price) || 0,
-        original_price: productData.original_price ? Number(productData.original_price) : undefined,
-        featured: !!productData.featured,
-      };
-      await upsertProduct(newProduct);
-      return res.json([newProduct]);
-    } catch (err: any) {
-      console.error("[D1 Product Create Error, falling back to local DB]", err);
-    }
+  try {
+    const id = productData.id || (await nextProductId());
+    const newProduct: Product = {
+      ...productData,
+      id,
+      price: Number(productData.price) || 0,
+      original_price: productData.original_price ? Number(productData.original_price) : undefined,
+      featured: !!productData.featured,
+    };
+    await upsertProduct(newProduct);
+    return res.json([newProduct]);
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao criar produto no Cloudflare D1.");
   }
-
-  const dbData = readLocalDb();
-  const id = productData.id || `p-${Date.now()}`;
-  const newProduct: Product = {
-    ...productData,
-    id,
-    price: Number(productData.price) || 0,
-    original_price: productData.original_price ? Number(productData.original_price) : undefined,
-    featured: !!productData.featured,
-  };
-  dbData.products = dbData.products.filter((p) => p.id !== id);
-  dbData.products.push(newProduct);
-  writeLocalDb(dbData);
-  res.json([newProduct]);
 });
 
 app.patch("/api/products/:id", async (req, res) => {
+  if (!ensureD1(res)) return;
   const { id } = req.params;
   const updates = req.body;
+  try {
+    const existing = await getProductById(id);
+    let updated: Product;
 
-  if (isCloudflareD1Configured()) {
-    try {
-      const existing = await getProductById(id);
-      let updated: Product;
-
-      if (existing) {
-        updated = {
-          ...existing,
-          ...updates,
-          id,
-          price: updates.price !== undefined ? Number(updates.price) : existing.price,
-          original_price:
-            updates.original_price !== undefined
-              ? (updates.original_price ? Number(updates.original_price) : undefined)
-              : existing.original_price,
-          featured: updates.featured !== undefined ? !!updates.featured : existing.featured,
-        };
-      } else {
-        updated = {
-          id,
-          name: updates.name || "",
-          description: updates.description || "",
-          price: Number(updates.price) || 0,
-          image: updates.image || "",
-          category: updates.category || "",
-          ...updates,
-          featured: !!updates.featured,
-        };
-      }
-
-      await upsertProduct(updated);
-      return res.json([updated]);
-    } catch (err: any) {
-      console.error("[D1 Product Patch Error, falling back to local DB]", err);
+    if (existing) {
+      updated = {
+        ...existing,
+        ...updates,
+        id,
+        price: updates.price !== undefined ? Number(updates.price) : existing.price,
+        original_price:
+          updates.original_price !== undefined
+            ? (updates.original_price ? Number(updates.original_price) : undefined)
+            : existing.original_price,
+        featured: updates.featured !== undefined ? !!updates.featured : existing.featured,
+      };
+    } else {
+      updated = {
+        id,
+        name: updates.name || "",
+        description: updates.description || "",
+        price: Number(updates.price) || 0,
+        image: updates.image || "",
+        category: updates.category || "",
+        ...updates,
+        featured: !!updates.featured,
+      };
     }
+
+    await upsertProduct(updated);
+    return res.json([updated]);
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao atualizar produto no Cloudflare D1.");
   }
-
-  const dbData = readLocalDb();
-  const existingIndex = dbData.products.findIndex((p) => p.id === id);
-  let updated: Product;
-
-  if (existingIndex !== -1) {
-    updated = {
-      ...dbData.products[existingIndex],
-      ...updates,
-      id,
-      price: updates.price !== undefined ? Number(updates.price) : dbData.products[existingIndex].price,
-      original_price:
-        updates.original_price !== undefined
-          ? (updates.original_price ? Number(updates.original_price) : undefined)
-          : dbData.products[existingIndex].original_price,
-      featured: updates.featured !== undefined ? !!updates.featured : dbData.products[existingIndex].featured,
-    };
-    dbData.products[existingIndex] = updated;
-  } else {
-    updated = {
-      id,
-      name: updates.name || "",
-      description: updates.description || "",
-      price: Number(updates.price) || 0,
-      image: updates.image || "",
-      category: updates.category || "",
-      ...updates,
-      featured: !!updates.featured,
-    };
-    dbData.products.push(updated);
-  }
-
-  writeLocalDb(dbData);
-  res.json([updated]);
 });
 
 app.delete("/api/products/:id", async (req, res) => {
+  if (!ensureD1(res)) return;
   const { id } = req.params;
-  if (isCloudflareD1Configured()) {
-    try {
-      await executeD1("DELETE FROM products WHERE id = ?;", [id]);
-      return res.json({ ok: true });
-    } catch (err: any) {
-      console.error("[D1 Product Delete Error, falling back to local DB]", err);
-    }
+  try {
+    await executeD1("DELETE FROM products WHERE id = ?;", [id]);
+    return res.json({ ok: true });
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao excluir produto no Cloudflare D1.");
   }
-
-  const dbData = readLocalDb();
-  dbData.products = dbData.products.filter((p) => p.id !== id);
-  writeLocalDb(dbData);
-  res.json({ ok: true });
 });
 
 // --- CATEGORIES ---
@@ -942,19 +848,17 @@ const toSlug = (s: string) =>
   s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "");
 
 app.get("/api/categories", async (req, res) => {
-  if (isCloudflareD1Configured()) {
-    try {
-      const rows = await executeD1("SELECT * FROM categories;");
-      return res.json(rows.map(mapCategoryRow));
-    } catch (err: any) {
-      console.error("[D1 Categories Error, falling back to local DB]", err);
-    }
+  if (!ensureD1(res)) return;
+  try {
+    const rows = await executeD1("SELECT * FROM categories;");
+    return res.json(rows.map(mapCategoryRow));
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao buscar categorias do Cloudflare D1.");
   }
-  const dbData = readLocalDb();
-  res.json(dbData.categories);
 });
 
 app.post("/api/categories", async (req, res) => {
+  if (!ensureD1(res)) return;
   const { name, slug, parentId, isBrand } = req.body;
   const finalSlug = slug || toSlug(name || "categoria");
 
@@ -966,109 +870,71 @@ app.post("/api/categories", async (req, res) => {
     isBrand: !!isBrand,
   };
 
-  if (isCloudflareD1Configured()) {
-    try {
-      await upsertCategory(newCategory);
-      return res.json([newCategory]);
-    } catch (err: any) {
-      console.error("[D1 Category Create Error, falling back to local DB]", err);
-    }
+  try {
+    await upsertCategory(newCategory);
+    return res.json([newCategory]);
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao criar categoria no Cloudflare D1.");
   }
-
-  const dbData = readLocalDb();
-  dbData.categories = dbData.categories.filter((c) => c.id !== newCategory.id);
-  dbData.categories.push(newCategory);
-  writeLocalDb(dbData);
-  res.json([newCategory]);
 });
 
 app.patch("/api/categories/:id", async (req, res) => {
+  if (!ensureD1(res)) return;
   const { id } = req.params;
   const updates = req.body;
 
-  if (isCloudflareD1Configured()) {
-    try {
-      const existing = await getCategoryById(id);
-      let updated: Category;
+  try {
+    const existing = await getCategoryById(id);
+    let updated: Category;
 
-      if (existing) {
-        const name = updates.name !== undefined ? updates.name : existing.name;
-        const slug = updates.slug !== undefined ? updates.slug : (updates.name ? toSlug(updates.name) : existing.slug);
-        const parentId = updates.parentId !== undefined ? updates.parentId : existing.parentId;
-        const isBrand = updates.isBrand !== undefined ? !!updates.isBrand : existing.isBrand;
+    if (existing) {
+      const name = updates.name !== undefined ? updates.name : existing.name;
+      const slug = updates.slug !== undefined ? updates.slug : (updates.name ? toSlug(updates.name) : existing.slug);
+      const parentId = updates.parentId !== undefined ? updates.parentId : existing.parentId;
+      const isBrand = updates.isBrand !== undefined ? !!updates.isBrand : existing.isBrand;
 
-        updated = { ...existing, name, slug, parentId: parentId || undefined, isBrand };
-      } else {
-        updated = {
-          id,
-          name: updates.name || "Categoria",
-          slug: updates.slug || toSlug(updates.name || "categoria"),
-          parentId: updates.parentId || undefined,
-          isBrand: !!updates.isBrand,
-        };
-      }
-
-      await upsertCategory(updated);
-      return res.json([updated]);
-    } catch (err: any) {
-      console.error("[D1 Category Patch Error, falling back to local DB]", err);
+      updated = { ...existing, name, slug, parentId: parentId || undefined, isBrand };
+    } else {
+      updated = {
+        id,
+        name: updates.name || "Categoria",
+        slug: updates.slug || toSlug(updates.name || "categoria"),
+        parentId: updates.parentId || undefined,
+        isBrand: !!updates.isBrand,
+      };
     }
+
+    await upsertCategory(updated);
+    return res.json([updated]);
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao atualizar categoria no Cloudflare D1.");
   }
-
-  const dbData = readLocalDb();
-  const index = dbData.categories.findIndex((c) => c.id === id);
-  let updated: Category;
-
-  if (index !== -1) {
-    updated = { ...dbData.categories[index], ...updates };
-    dbData.categories[index] = updated;
-  } else {
-    updated = {
-      id,
-      name: updates.name || "Categoria",
-      slug: updates.slug || toSlug(updates.name || "categoria"),
-      parentId: updates.parentId || undefined,
-      isBrand: !!updates.isBrand,
-    };
-    dbData.categories.push(updated);
-  }
-
-  writeLocalDb(dbData);
-  res.json([updated]);
 });
 
 app.delete("/api/categories/:id", async (req, res) => {
+  if (!ensureD1(res)) return;
   const { id } = req.params;
-  if (isCloudflareD1Configured()) {
-    try {
-      await executeD1("DELETE FROM categories WHERE id = ?;", [id]);
-      return res.json({ ok: true });
-    } catch (err: any) {
-      console.error("[D1 Category Delete Error, falling back to local DB]", err);
-    }
+  try {
+    await executeD1("DELETE FROM categories WHERE id = ?;", [id]);
+    return res.json({ ok: true });
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao excluir categoria no Cloudflare D1.");
   }
-
-  const dbData = readLocalDb();
-  dbData.categories = dbData.categories.filter((c) => c.id !== id);
-  writeLocalDb(dbData);
-  res.json({ ok: true });
 });
 
 // --- BANNERS ---
 app.get("/api/banners", async (req, res) => {
-  if (isCloudflareD1Configured()) {
-    try {
-      const rows = await executeD1("SELECT * FROM banners;");
-      return res.json(rows.map(mapBannerRow));
-    } catch (err: any) {
-      console.error("[D1 Banners Error, falling back to local DB]", err);
-    }
+  if (!ensureD1(res)) return;
+  try {
+    const rows = await executeD1("SELECT * FROM banners;");
+    return res.json(rows.map(mapBannerRow));
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao buscar banners do Cloudflare D1.");
   }
-  const dbData = readLocalDb();
-  res.json(dbData.banners);
 });
 
 app.post("/api/banners", async (req, res) => {
+  if (!ensureD1(res)) return;
   const bannerData = req.body;
   const newBanner: Banner = {
     id: bannerData.id || crypto.randomUUID(),
@@ -1082,140 +948,85 @@ app.post("/api/banners", async (req, res) => {
     overlayOpacity: bannerData.overlayOpacity !== undefined ? Number(bannerData.overlayOpacity) : 60,
   };
 
-  if (isCloudflareD1Configured()) {
-    try {
-      await upsertBanner(newBanner);
-      return res.json([newBanner]);
-    } catch (err: any) {
-      console.error("[D1 Banner Create Error, falling back to local DB]", err);
-    }
+  try {
+    await upsertBanner(newBanner);
+    return res.json([newBanner]);
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao criar banner no Cloudflare D1.");
   }
-
-  const dbData = readLocalDb();
-  dbData.banners = dbData.banners.filter((b) => b.id !== newBanner.id);
-  dbData.banners.push(newBanner);
-  writeLocalDb(dbData);
-  res.json([newBanner]);
 });
 
 app.patch("/api/banners/:id", async (req, res) => {
+  if (!ensureD1(res)) return;
   const { id } = req.params;
   const updates = req.body;
 
-  if (isCloudflareD1Configured()) {
-    try {
-      const existing = await getBannerById(id);
-      let updated: Banner;
+  try {
+    const existing = await getBannerById(id);
+    let updated: Banner;
 
-      if (existing) {
-        updated = {
-          ...existing,
-          ...updates,
-          id,
-          active: updates.active !== undefined ? !!updates.active : existing.active,
-          opacity: updates.opacity !== undefined ? Number(updates.opacity) : existing.opacity,
-          overlayOpacity: updates.overlayOpacity !== undefined ? Number(updates.overlayOpacity) : existing.overlayOpacity,
-        };
-      } else {
-        updated = {
-          id,
-          image: updates.image || "",
-          title: updates.title || "",
-          subtitle: updates.subtitle || "",
-          cta: updates.cta || "",
-          active: updates.active !== undefined ? !!updates.active : true,
-          device: updates.device || "all",
-          opacity: updates.opacity !== undefined ? Number(updates.opacity) : 100,
-          overlayOpacity: updates.overlayOpacity !== undefined ? Number(updates.overlayOpacity) : 60,
-        };
-      }
-
-      await upsertBanner(updated);
-      return res.json([updated]);
-    } catch (err: any) {
-      console.error("[D1 Banner Patch Error, falling back to local DB]", err);
+    if (existing) {
+      updated = {
+        ...existing,
+        ...updates,
+        id,
+        active: updates.active !== undefined ? !!updates.active : existing.active,
+        opacity: updates.opacity !== undefined ? Number(updates.opacity) : existing.opacity,
+        overlayOpacity: updates.overlayOpacity !== undefined ? Number(updates.overlayOpacity) : existing.overlayOpacity,
+      };
+    } else {
+      updated = {
+        id,
+        image: updates.image || "",
+        title: updates.title || "",
+        subtitle: updates.subtitle || "",
+        cta: updates.cta || "",
+        active: updates.active !== undefined ? !!updates.active : true,
+        device: updates.device || "all",
+        opacity: updates.opacity !== undefined ? Number(updates.opacity) : 100,
+        overlayOpacity: updates.overlayOpacity !== undefined ? Number(updates.overlayOpacity) : 60,
+      };
     }
+
+    await upsertBanner(updated);
+    return res.json([updated]);
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao atualizar banner no Cloudflare D1.");
   }
-
-  const dbData = readLocalDb();
-  const index = dbData.banners.findIndex((b) => b.id === id);
-  let updated: Banner;
-
-  if (index !== -1) {
-    updated = { ...dbData.banners[index], ...updates };
-    dbData.banners[index] = updated;
-  } else {
-    updated = {
-      id,
-      image: updates.image || "",
-      title: updates.title || "",
-      subtitle: updates.subtitle || "",
-      cta: updates.cta || "",
-      active: updates.active !== undefined ? !!updates.active : true,
-      device: updates.device || "all",
-      opacity: updates.opacity !== undefined ? Number(updates.opacity) : 100,
-      overlayOpacity: updates.overlayOpacity !== undefined ? Number(updates.overlayOpacity) : 60,
-    };
-    dbData.banners.push(updated);
-  }
-
-  writeLocalDb(dbData);
-  res.json([updated]);
 });
 
 app.delete("/api/banners/:id", async (req, res) => {
+  if (!ensureD1(res)) return;
   const { id } = req.params;
-  if (isCloudflareD1Configured()) {
-    try {
-      await executeD1("DELETE FROM banners WHERE id = ?;", [id]);
-      return res.json({ ok: true });
-    } catch (err: any) {
-      console.error("[D1 Banner Delete Error, falling back to local DB]", err);
-    }
+  try {
+    await executeD1("DELETE FROM banners WHERE id = ?;", [id]);
+    return res.json({ ok: true });
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao excluir banner no Cloudflare D1.");
   }
-
-  const dbData = readLocalDb();
-  dbData.banners = dbData.banners.filter((b) => b.id !== id);
-  writeLocalDb(dbData);
-  res.json({ ok: true });
 });
 
 // --- SETTINGS ---
 app.get("/api/settings", async (req, res) => {
-  if (isCloudflareD1Configured()) {
-    try {
-      const rows = await executeD1("SELECT * FROM settings;");
-      return res.json(rows.map((r: any) => ({ key: r.key, value: r.value })));
-    } catch (err: any) {
-      console.error("[D1 Settings Error, falling back to local DB]", err);
-    }
+  if (!ensureD1(res)) return;
+  try {
+    const rows = await executeD1("SELECT * FROM settings;");
+    return res.json(rows.map((r: any) => ({ key: r.key, value: r.value })));
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao buscar configurações do Cloudflare D1.");
   }
-  const dbData = readLocalDb();
-  res.json(dbData.settings || []);
 });
 
 app.post("/api/settings", async (req, res) => {
+  if (!ensureD1(res)) return;
   const { key, value } = req.body;
-  if (isCloudflareD1Configured()) {
-    try {
-      await executeD1(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`, [key, value]);
-      const rows = await executeD1("SELECT * FROM settings;");
-      return res.json(rows.map((r: any) => ({ key: r.key, value: r.value })));
-    } catch (err: any) {
-      console.error("[D1 Settings Save Error, falling back to local DB]", err);
-    }
+  try {
+    await executeD1(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`, [key, value]);
+    const rows = await executeD1("SELECT * FROM settings;");
+    return res.json(rows.map((r: any) => ({ key: r.key, value: r.value })));
+  } catch (err: any) {
+    d1ErrorResponse(res, err, "Erro ao salvar configuração no Cloudflare D1.");
   }
-
-  const dbData = readLocalDb();
-  if (!dbData.settings) dbData.settings = [];
-  const existingIndex = dbData.settings.findIndex((s) => s.key === key);
-  if (existingIndex !== -1) {
-    dbData.settings[existingIndex].value = value;
-  } else {
-    dbData.settings.push({ key, value });
-  }
-  writeLocalDb(dbData);
-  res.json(dbData.settings);
 });
 
 // Error handling middleware for API routes to ensure JSON format
